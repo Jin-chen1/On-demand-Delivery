@@ -1,0 +1,151 @@
+# Day 13: PPO调试训练配置
+# 低负载场景（500单），用于快速验证训练流水线
+
+# 仿真环境配置
+simulation:
+  # 数据路径
+  data_dir: 'data/processed'
+  orders_file: 'data/orders/orders.csv'
+  
+  # 低负载场景：500单，20骑手
+  total_orders: 500
+  num_couriers: 20
+  
+  # 仿真时长：2小时（快速测试）
+  simulation_duration: 7200  # 秒
+  
+  # 调度间隔
+  dispatch_interval: 30  # 每30秒触发一次调度决策
+  
+  # 调度器类型（RL环境会覆盖）
+  dispatcher_type: 'greedy'
+  dispatcher_config: {}
+  
+  # 骑手配置
+  courier_config:
+    speed:
+      mean: 15.0  # km/h
+      std: 2.0
+      min: 10.0
+      max: 20.0
+    capacity:
+      max_orders: 5  # 最大同时携带订单数
+
+# RL特定配置
+rl:
+  # 状态编码器配置
+  state_encoder:
+    max_pending_orders: 30  # 低负载场景减小状态空间
+    max_couriers: 30
+    grid_size: 8  # 8x8空间网格
+  
+  # 奖励函数配置
+  reward_calculator:
+    reward_type: "dense"  # 密集奖励，加速学习
+    
+    # 权重参数
+    weight_timeout_penalty: 10.0
+    weight_distance_cost: 0.001
+    weight_wait_time: 0.01
+    weight_completion_bonus: 5.0
+    weight_balanced_load: 1.0
+    
+    # Reward Shaping
+    use_shaping: true
+    discount_factor: 0.99
+  
+  # 动作空间
+  action_space:
+    mode: "discrete"  # 离散动作，适合PPO
+  
+  # 训练超参数（调试配置）
+  training:
+    algorithm: "PPO"
+    
+    # 调试训练步数（较小）
+    total_timesteps: 50000  # 5万步，快速验证
+    
+    # 学习率
+    learning_rate: 0.0003
+    
+    # 折扣因子
+    gamma: 0.99
+    
+    # PPO参数（优化用于小规模训练）
+    ppo:
+      n_steps: 512  # 减小以加速迭代
+      batch_size: 64
+      n_epochs: 5  # 减少epoch数
+      gae_lambda: 0.95
+      clip_range: 0.2
+      ent_coef: 0.02  # 增加探索
+    
+    # 网络架构
+    policy:
+      net_arch: [128, 128]  # 较小网络，快速训练
+      activation: "relu"
+    
+    # 训练策略
+    training_strategy:
+      use_curriculum_learning: false  # 调试时不使用课程学习
+      num_parallel_envs: 1  # 单环境调试
+  
+  # 评估配置
+  evaluation:
+    eval_freq: 5000  # 每5000步评估
+    n_eval_episodes: 3  # 3个Episode评估
+    save_freq: 10000  # 每10000步保存检查点
+    
+    # 对比基线
+    baselines:
+      - "greedy"
+      - "ortools"
+  
+  # 日志配置
+  logging:
+    tensorboard: true
+    log_dir: "./outputs/rl_training/logs"
+    use_wandb: false
+  
+  # 模型保存路径
+  model_save_path: "./outputs/rl_training/models"
+
+# 场景配置（Day 13主要使用low_load）
+scenarios:
+  # 调试场景：极低负载
+  debug:
+    total_orders: 100
+    num_couriers: 10
+    simulation_duration: 3600
+    description: "调试场景，100单/10骑手，1小时"
+  
+  # 低负载场景（Day 13主要场景）
+  low_load:
+    total_orders: 500
+    num_couriers: 20
+    simulation_duration: 7200
+    description: "低负载场景，500单/20骑手，2小时"
+  
+  # 中负载场景
+  medium_load:
+    total_orders: 1000
+    num_couriers: 20
+    simulation_duration: 14400
+    description: "中负载场景，1000单/20骑手，4小时"
+
+# 随机种子（可复现）
+seed: 42
+
+# 性能基准参考（来自Day 8-9实验）
+benchmarks:
+  low_load_reference:
+    greedy:
+      timeout_rate: 0.85
+      completion_rate: 0.15
+    ortools:
+      timeout_rate: 0.75
+      completion_rate: 0.25
+    # RL目标：超越ortools
+    rl_target:
+      timeout_rate: 0.70
+      completion_rate: 0.30

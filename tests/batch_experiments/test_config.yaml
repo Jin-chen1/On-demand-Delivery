@@ -1,0 +1,92 @@
+# 小批量测试配置
+# 用于验证功能：2订单量 × 2骑手数 × 2调度器 × 1重复 = 8次实验
+
+experiment:
+  name: "Day8_Small_Test"
+  description: "Small batch test to verify functionality"
+  output_base_dir: "outputs/day8_test"
+
+# 实验维度配置（缩减版）
+dimensions:
+  # 只测试2个订单量
+  num_orders: [500, 1000]
+  
+  # 只测试2个骑手数
+  num_couriers: [15, 20]
+  
+  # 只测试2个调度器（跳过ALNS以节省时间）
+  dispatchers:
+    - type: "greedy"
+      config: {}
+    
+    - type: "ortools"
+      config:
+        time_limit_seconds: 3  # 缩短求解时间
+        soft_time_windows: true
+        time_window_slack: 180.0
+  
+  # 只运行1次（不重复）
+  random_seeds: [42]
+
+# 仿真基础配置
+simulation:
+  duration: 3600  # 1小时仿真
+  dispatch_interval: 30.0
+  
+  order_generation:
+    arrival_process:
+      type: "poisson"
+    
+    spatial_distribution:
+      merchant:
+        type: "clustered"
+        num_clusters: 5
+        cluster_std: 300
+      
+      customer:
+        type: "uniform"
+        coverage: 0.9
+    
+    service_time:
+      preparation_time: [300, 900]
+      delivery_window: [1800, 3600]
+      pickup_duration: 120
+      dropoff_duration: 120
+
+# 骑手配置
+courier:
+  speed:
+    mean: 15.0
+    std: 2.0
+    min: 10.0
+    max: 20.0
+  
+  capacity:
+    max_orders: 5
+    max_distance: 10000
+
+# 实验执行配置
+execution:
+  max_retries: 1
+  continue_on_error: true
+  save_progress_interval: 2
+  enable_checkpoint: true
+  detailed_logging: true
+  log_level: "INFO"
+
+# 结果收集配置
+results:
+  formats: ["csv", "json"]
+  
+  metrics:
+    - total_orders
+    - completed_orders
+    - timeout_rate
+    - completion_rate
+    - avg_service_time
+    - avg_solve_time
+  
+  aggregation:
+    enabled: true
+    group_by: ["num_orders", "num_couriers", "dispatcher"]
+    statistics: ["mean", "std"]

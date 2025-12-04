@@ -1,0 +1,125 @@
+# 即时配送仿真系统配置文件
+
+# 路网配置
+network:
+  # 目标城市和区域
+  location:
+    city: "Shanghai, China"  # 城市名称
+    area: "Jing'an District"  # 区域名称（静安寺商圈）
+    center_point: [31.2252, 121.4450]  # 中心点坐标 [纬度, 经度]
+    radius: 2500  # 半径(米)，约5km²圆形区域
+  
+  # 路网类型
+  network_type: "drive"  # drive: 可驾驶道路, walk: 步行道路, bike: 自行车道
+  
+  # 简化参数
+  simplify: true  # 是否简化路网
+  retain_all: false  # 是否保留所有节点
+  
+  # 输出文件
+  output:
+    graph_file: "data/processed/road_network.graphml"
+    nodes_file: "data/processed/network_nodes.csv"
+    edges_file: "data/processed/network_edges.csv"
+
+# 距离矩阵配置
+distance_matrix:
+  # 计算方法
+  method: "dijkstra"  # dijkstra: 精确最短路径, floyd_warshall: 全对最短路径
+  
+  # 权重类型
+  weight: "length"  # length: 距离, travel_time: 行程时间
+  
+  # 采样策略（若节点过多）
+  sampling:
+    enabled: false  # 禁用采样，使用全部节点以支持路网距离计算
+    max_nodes: 2000  # 最大节点数（上海小路网1155节点）
+    strategy: "spatial_uniform"  # spatial_uniform: 空间均匀采样, random: 随机采样
+  
+  # 输出文件
+  output:
+    distance_matrix_file: "data/processed/distance_matrix.npy"
+    time_matrix_file: "data/processed/time_matrix.npy"
+    node_mapping_file: "data/processed/node_id_mapping.json"
+
+# 订单生成配置
+order_generation:
+  # 时间配置
+  simulation_duration: 86400  # 仿真时长(秒)，86400秒=24小时
+  time_unit: "second"  # 时间单位
+  
+  # 订单数量
+  total_orders: 1000  # 总订单数
+  
+  # 到达过程
+  arrival_process:
+    type: "poisson"  # poisson: 泊松过程, non_homogeneous: 非齐次泊松
+    rate: 0.0116  # 平均到达率(订单/秒)，1000单/天≈0.0116单/秒
+    
+    # 非齐次泊松参数（如启用）
+    peak_hours: [[11, 13], [18, 20]]  # 高峰时段
+    peak_multiplier: 3.0  # 高峰时段倍率
+  
+  # 空间分布
+  spatial_distribution:
+    # 商家分布
+    merchant:
+      type: "clustered"  # 分布类型: clustered(聚类), uniform(均匀), kde(核密度估计)
+      num_clusters: 5  # 聚类数量（仅clustered模式）
+      cluster_std: 300  # 聚类标准差/米（仅clustered模式）
+      # data_source: "data/raw/olist_sellers.csv"  # KDE模式：真实数据路径（可选）
+      # 注意：启用kde模式时，如果data_source为空或文件不存在，
+      #      系统将自动使用模拟Olist特征的合成数据
+    
+    # 客户分布
+    customer:
+      type: "uniform"  # 客户通常更分散
+      coverage: 0.9  # 覆盖区域比例（仅uniform模式）
+      # data_source: "data/raw/olist_customers.csv"  # KDE模式：真实数据路径（可选）
+  
+  # 服务时间配置
+  service_time:
+    preparation_time: [300, 900]  # 餐品准备时间范围(秒) [5-15分钟]
+    delivery_window: [1800, 3600]  # 配送时间窗(秒) [30-60分钟]
+    pickup_duration: 120  # 取货耗时(秒)
+    dropoff_duration: 120  # 送货耗时(秒)
+  
+  # 输出文件
+  output:
+    orders_file: "data/orders/orders.csv"
+    merchants_file: "data/processed/merchants.csv"
+    customers_file: "data/processed/customers.csv"
+
+# 骑手配置
+courier:
+  # 数量配置
+  num_couriers: 30  # 骑手数量
+  
+  # 速度配置
+  speed:
+    mean: 15.0  # 平均速度(km/h)
+    std: 2.0  # 速度标准差
+    min: 10.0  # 最小速度
+    max: 20.0  # 最大速度
+  
+  # 容量配置
+  capacity:
+    max_orders: 5  # 最大同时携带订单数
+    max_distance: 10000  # 最大单次配送距离(米)
+
+# 仿真配置
+simulation:
+  # 调度配置
+  dispatch_interval: 30  # 调度间隔(秒)，建议10-60秒
+  
+  # 仿真时长
+  duration: 86400  # 仿真时长(秒)，86400秒=24小时
+
+# 随机种子（保证可复现）
+random_seed: 42
+
+# 日志配置
+logging:
+  level: "INFO"  # DEBUG, INFO, WARNING, ERROR
+  log_file: "logs/data_preparation.log"
+  console_output: true

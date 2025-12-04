@@ -1,0 +1,118 @@
+# Day 8 批量实验配置文件
+# 压力测试：不同订单量和骑手数的组合实验
+
+experiment:
+  name: "Day8_Batch_Stress_Test"
+  description: "Batch experiments for stress testing with varying order volumes and courier capacities"
+  output_base_dir: "outputs/day8_batch_experiment"
+
+# 实验维度配置
+dimensions:
+  # 订单量维度（压力等级）
+  num_orders: [500, 1000, 1500]
+  
+  # 骑手数量维度（运力配置）
+  num_couriers: [10, 15, 20, 25]
+  
+  # 调度器类型
+  dispatchers:
+    - type: "greedy"
+      config: {}
+    
+    - type: "ortools"
+      config:
+        time_limit_seconds: 5
+        soft_time_windows: true
+        time_window_slack: 180.0
+    
+    - type: "alns"
+      config:
+        iterations: 100
+        destroy_degree_min: 0.1
+        destroy_degree_max: 0.3
+        temperature_start: 5000.0
+        temperature_end: 1.0
+        temperature_decay: 0.95
+  
+  # 随机种子（重复实验）
+  random_seeds: [42, 123]
+
+# 仿真基础配置
+simulation:
+  duration: 3600  # 1小时仿真
+  dispatch_interval: 30.0  # 调度间隔30秒
+  
+  # 订单生成配置（会根据num_orders动态调整）
+  order_generation:
+    arrival_process:
+      type: "poisson"  # 齐次泊松过程
+    
+    spatial_distribution:
+      merchant:
+        type: "clustered"
+        num_clusters: 5
+        cluster_std: 300
+      
+      customer:
+        type: "uniform"
+        coverage: 0.9
+    
+    service_time:
+      preparation_time: [300, 900]
+      delivery_window: [1800, 3600]
+      pickup_duration: 120
+      dropoff_duration: 120
+
+# 骑手配置
+courier:
+  speed:
+    mean: 15.0  # km/h
+    std: 2.0
+    min: 10.0
+    max: 20.0
+  
+  capacity:
+    max_orders: 5
+    max_distance: 10000
+
+# 实验执行配置
+execution:
+  # 错误处理
+  max_retries: 2  # 单个实验失败最大重试次数
+  continue_on_error: true  # 单次失败不中断整体流程
+  
+  # 进度保存
+  save_progress_interval: 5  # 每5个实验保存一次进度
+  enable_checkpoint: true  # 启用断点续传
+  
+  # 日志配置
+  detailed_logging: true  # 保存每个实验的详细日志
+  log_level: "INFO"
+
+# 结果收集配置
+results:
+  # 保存格式
+  formats: ["csv", "json"]
+  
+  # 关键指标列表
+  metrics:
+    - total_orders
+    - completed_orders
+    - timeout_orders
+    - timeout_rate
+    - completion_rate
+    - avg_service_time
+    - median_service_time
+    - std_service_time
+    - total_distance
+    - avg_distance_per_order
+    - avg_courier_utilization
+    - avg_solve_time
+    - solve_success_rate
+    - dispatch_count
+  
+  # 聚合分析
+  aggregation:
+    enabled: true
+    group_by: ["num_orders", "num_couriers", "dispatcher"]
+    statistics: ["mean", "std", "min", "max"]

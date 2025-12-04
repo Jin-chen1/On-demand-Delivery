@@ -1,0 +1,305 @@
+# Day 25: 场景配置文件
+# 定义不同天气和压力测试场景
+
+# ===========================
+# 天气场景配置
+# ===========================
+weather_scenarios:
+  sunny:
+    description: "晴天正常场景 - 基准测试"
+    speed_multiplier: 1.0  # 速度系数（1.0表示正常）
+    order_rate_multiplier: 1.0  # 订单到达率系数
+    prep_time_multiplier: 1.0  # 备餐时间系数
+    enabled: true
+    
+  cloudy:
+    description: "多云场景 - 轻微影响"
+    speed_multiplier: 0.95
+    order_rate_multiplier: 1.05
+    prep_time_multiplier: 1.0
+    enabled: true
+    
+  light_rain:
+    description: "小雨场景 - 中等影响"
+    speed_multiplier: 0.85
+    order_rate_multiplier: 1.15
+    prep_time_multiplier: 1.05
+    enabled: true
+    
+  rainy:
+    description: "雨天场景 - 骑手速度降低，订单量上升"
+    speed_multiplier: 0.7
+    order_rate_multiplier: 1.3
+    prep_time_multiplier: 1.1
+    enabled: true
+    
+  heavy_rain:
+    description: "大雨场景 - 显著影响配送效率"
+    speed_multiplier: 0.6
+    order_rate_multiplier: 1.4
+    prep_time_multiplier: 1.15
+    enabled: true
+    
+  extreme_rain:
+    description: "暴雨场景 - 系统压力测试"
+    speed_multiplier: 0.5
+    order_rate_multiplier: 1.5
+    prep_time_multiplier: 1.2
+    enabled: true
+    
+  snow:
+    description: "雪天场景 - 严重影响"
+    speed_multiplier: 0.5
+    order_rate_multiplier: 1.2
+    prep_time_multiplier: 1.1
+    enabled: true
+    
+  hot_weather:
+    description: "高温天气 - 订单量上升"
+    speed_multiplier: 0.95
+    order_rate_multiplier: 1.25
+    prep_time_multiplier: 1.0
+    enabled: true
+
+# ===========================
+# 交通配置
+# ===========================
+traffic:
+  enable_time_varying_speed: true
+  
+  # 交通高峰期配置
+  morning_peak:
+    start_hour: 7
+    end_hour: 9
+    congestion_factor: 0.6  # 速度降至60%
+    
+  evening_peak:
+    start_hour: 17
+    end_hour: 19
+    congestion_factor: 0.6
+    
+  # 用餐高峰期配置
+  lunch_peak:
+    start_hour: 11
+    end_hour: 13
+    congestion_factor: 0.8
+    
+  dinner_peak:
+    start_hour: 18
+    end_hour: 20
+    congestion_factor: 0.8
+    
+  # 速度随机噪声
+  speed_noise_std: 0.1  # 10%标准差
+
+# ===========================
+# 压力测试场景
+# ===========================
+stress_test_scenarios:
+  low_load:
+    description: "低负载场景"
+    total_orders: 500
+    num_couriers: 20
+    order_courier_ratio: 25
+    simulation_duration: 7200  # 2小时
+    
+  medium_load:
+    description: "中负载场景 - MVP基准"
+    total_orders: 1000
+    num_couriers: 20
+    order_courier_ratio: 50
+    simulation_duration: 7200
+    
+  high_load:
+    description: "高负载场景 - 压力测试"
+    total_orders: 1500
+    num_couriers: 20
+    order_courier_ratio: 75
+    simulation_duration: 7200
+    
+  extreme_load:
+    description: "极端负载场景 - 系统崩溃测试"
+    total_orders: 2000
+    num_couriers: 20
+    order_courier_ratio: 100
+    simulation_duration: 7200
+    
+  insufficient_capacity:
+    description: "运力不足场景"
+    total_orders: 1000
+    num_couriers: 10
+    order_courier_ratio: 100
+    simulation_duration: 7200
+
+# ===========================
+# 鲁棒性测试场景
+# ===========================
+robustness_scenarios:
+  order_surge:
+    description: "订单激增场景 (+50%)"
+    base_scenario: "medium_load"
+    order_rate_multiplier: 1.5
+    duration_seconds: 1800  # 30分钟激增
+    
+  courier_dropout:
+    description: "骑手掉线场景 (-30%)"
+    base_scenario: "medium_load"
+    courier_dropout_rate: 0.3
+    dropout_duration: 3600  # 1小时
+    
+  merchant_delay:
+    description: "商家延迟场景 (+50%备餐时间)"
+    base_scenario: "medium_load"
+    prep_time_multiplier: 1.5
+    
+  combined_stress:
+    description: "组合压力场景 - 暴雨+爆单"
+    weather: "extreme_rain"
+    order_rate_multiplier: 1.5
+    speed_multiplier: 0.5
+    prep_time_multiplier: 1.3
+
+# ===========================
+# 消融实验配置 (重新设计)
+# ===========================
+# 实验设计说明：
+# - 完整模型使用Hybrid-HRL架构：RL派单 + 底层路径优化
+# - 消融实验验证各组件贡献
+# - 基线对照使用纯启发式算法
+ablation_experiments:
+  # ========== 完整模型（基准）==========
+  full_model:
+    description: "Hybrid-HRL完整模型 (RL派单 + Greedy路径 + 商家特征)"
+    dispatcher_type: "rl"
+    routing_optimizer: "greedy"
+    enable_merchant_features: true
+    enable_time_varying_speed: true
+    
+  # ========== A1: 商家特征消融 ==========
+  no_merchant_features:
+    description: "A1消融 - 移除商家备餐建模特征"
+    dispatcher_type: "rl"
+    routing_optimizer: "greedy"
+    enable_merchant_features: false  # 关键：关闭商家特征
+    enable_time_varying_speed: true
+    
+  # ========== A2: 路径优化器消融 ==========
+  alns_routing:
+    description: "A2对比 - 使用ALNS路径优化"
+    dispatcher_type: "rl"
+    routing_optimizer: "alns"  # 使用ALNS替代Greedy
+    enable_merchant_features: true
+    enable_time_varying_speed: true
+    
+  # ========== 基线对照组 ==========
+  pure_alns:
+    description: "基线对照 - 纯ALNS调度器（无RL）"
+    dispatcher_type: "alns"  # 不使用RL，验证RL贡献
+    enable_merchant_features: true
+    enable_time_varying_speed: true
+    
+  pure_greedy:
+    description: "基线对照 - 纯Greedy调度器（最低基线）"
+    dispatcher_type: "greedy"  # 最简单基线
+    enable_merchant_features: true
+    enable_time_varying_speed: true
+  
+  # ========== 高负载场景测试 ==========
+  high_load_full:
+    description: "高负载完整模型 - 验证商家特征在压力下的贡献"
+    dispatcher_type: "rl"
+    routing_optimizer: "greedy"
+    enable_merchant_features: true
+    enable_time_varying_speed: true
+    num_couriers: 10  # 减少骑手
+    simulation_duration: 7200  # 2小时（更短时间内处理相同订单）
+    
+  high_load_no_merchant:
+    description: "高负载消融 - 移除商家特征"
+    dispatcher_type: "rl"
+    routing_optimizer: "greedy"
+    enable_merchant_features: false
+    enable_time_varying_speed: true
+    num_couriers: 10
+    simulation_duration: 7200
+
+# ===========================
+# 骑手行为模型配置
+# ===========================
+courier_behavior:
+  # 是否启用接单概率模型
+  enable_acceptance_model: true
+  
+  # 接单概率模型权重: P_accept = σ(w · features)
+  acceptance_weights:
+    distance: -0.5      # 距离越远，接单意愿越低
+    reward: 1.0         # 报酬越高，接单意愿越高
+    current_load: -0.3  # 当前负载越高，接单意愿越低
+    fatigue: -0.4       # 疲劳度越高，接单意愿越低
+    peak_hour: 0.2      # 高峰期接单意愿略高
+    bias: 0.5           # 基础接单倾向
+  
+  # 疲劳度参数
+  fatigue_recovery_rate: 0.001    # 疲劳恢复速率（每秒）
+  fatigue_accumulation_rate: 0.0001  # 疲劳累积速率（每米）
+  
+  # 骑手类型（不同类型有不同行为特征）
+  courier_types:
+    enthusiastic:
+      description: "积极型骑手 - 接单意愿高"
+      base_acceptance_rate_range: [0.85, 1.0]
+      fatigue_recovery_rate: 0.002
+      fatigue_accumulation_rate: 0.00005
+      
+    normal:
+      description: "普通型骑手 - 标准行为"
+      base_acceptance_rate_range: [0.7, 0.85]
+      fatigue_recovery_rate: 0.001
+      fatigue_accumulation_rate: 0.0001
+      
+    selective:
+      description: "挑剔型骑手 - 偏好短距高价订单"
+      base_acceptance_rate_range: [0.5, 0.7]
+      fatigue_recovery_rate: 0.0015
+      fatigue_accumulation_rate: 0.00015
+      acceptance_weights_override:
+        distance: -0.8
+        reward: 1.5
+
+# ===========================
+# 商家备餐参数
+# ===========================
+merchant_config:
+  # Gamma分布参数（默认值）
+  default_prep_alpha: 2.0  # 形状参数
+  default_prep_beta: 0.02  # 速率参数（期望值=100秒）
+  
+  # 服务能力参数
+  default_service_rate: 0.01  # 每秒处理订单数
+  default_num_servers: 2  # 并行制作能力
+  
+  # 商家类型（不同类型有不同参数）
+  merchant_types:
+    fast_food:
+      prep_alpha: 1.5
+      prep_beta: 0.03  # 期望50秒
+      service_rate: 0.02
+      num_servers: 3
+      
+    regular_restaurant:
+      prep_alpha: 2.0
+      prep_beta: 0.02  # 期望100秒
+      service_rate: 0.01
+      num_servers: 2
+      
+    fine_dining:
+      prep_alpha: 3.0
+      prep_beta: 0.015  # 期望200秒
+      service_rate: 0.005
+      num_servers: 2
+      
+    cafe:
+      prep_alpha: 1.5
+      prep_beta: 0.025  # 期望60秒
+      service_rate: 0.015
+      num_servers: 2

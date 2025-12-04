@@ -1,0 +1,82 @@
+# Day 9 快速测试配置
+# 用于快速验证Day 9可视化功能
+
+experiment:
+  name: "Day9_Quick_Test"
+  description: "Quick test for Day 9 visualization with minimal experiments"
+  output_base_dir: "outputs/day9_quick_test"
+
+# 实验维度配置（简化版）
+dimensions:
+  # 只测试2个订单量
+  num_orders: [500, 1000]
+  
+  # 只测试2个骑手数
+  num_couriers: [10, 15]
+  
+  # 测试所有3种调度器
+  dispatchers:
+    - type: "greedy"
+      config: {}
+    
+    - type: "ortools"
+      config:
+        time_limit_seconds: 3
+        soft_time_windows: true
+        time_window_slack: 180.0
+    
+    - type: "alns"
+      config:
+        iterations: 50
+        destroy_degree_min: 0.1
+        destroy_degree_max: 0.3
+        temperature_start: 3000.0
+        temperature_end: 1.0
+        temperature_decay: 0.95
+  
+  # 只用1个种子（减少实验数量）
+  random_seeds: [42]
+
+# 仿真基础配置（缩短仿真时间）
+simulation:
+  duration: 1800  # 30分钟仿真（原来1小时）
+  dispatch_interval: 30.0
+  
+  order_generation:
+    arrival_process:
+      type: "poisson"
+    
+    spatial_distribution:
+      merchant:
+        type: "clustered"
+        num_clusters: 5
+        cluster_std: 300
+      
+      customer:
+        type: "uniform"
+        coverage: 0.9
+    
+    service_time:
+      preparation_time: [300, 900]
+      delivery_window: [1800, 3600]
+      pickup_duration: 120
+      dropoff_duration: 120
+
+# 骑手配置
+courier:
+  speed:
+    mean: 15.0
+    std: 2.0
+  capacity: 4
+
+# 执行配置
+execution:
+  max_retries: 1
+  continue_on_error: true
+  save_progress_interval: 3
+  enable_checkpoint: true
+
+# 结果收集配置
+results:
+  save_detailed_logs: false  # 关闭详细日志以加快速度
+  save_orders: true

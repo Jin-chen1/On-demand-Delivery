@@ -1,0 +1,324 @@
+# RL环境配置文件
+# 用于Phase 2: 强化学习训练
+
+# 仿真环境配置
+simulation:
+  total_orders: 500  # 使用500单数据集进行训练
+  num_couriers: 20
+  simulation_duration: 43200  # 12小时（秒）- 降低并发压力，使1000单训练可行
+  dispatch_interval: 60  # 调度间隔（秒）- 与Day 7测试一致
+  # 使用均匀网格采样数据（Solomon Random分布，覆盖全路网）
+  data_dir: "data/processed/shanghai"
+  orders_file: "data/orders/uniform_grid_500.csv"
+  use_gps_coords: false  # 使用路网最短路径距离（Dijkstra）
+  
+  # 订单生成配置（继承自data_preparation）
+  order_generation:
+    arrival_process:
+      type: "nhpp"  # 非齐次泊松过程
+      peak_hours: [11, 12, 18, 19, 20]  # 午餐和晚餐高峰
+      peak_rate_multiplier: 2.5
+      base_rate: 0.012  # 约1000单/天
+
+# RL特定配置
+rl:
+  # 状态编码器配置
+  state_encoder:
+    max_pending_orders: 50  # 待分配订单上限（用于固定状态维度）
+    max_couriers: 50  # 骑手数上限
+    grid_size: 10  # 空间网格大小（10x10=100维热力图）
+  
+  # 路径优化策略配置
+  # 选项: 'greedy_insert' (贪婪最优插入), 'alns' (ALNS 2-opt优化), 'fifo' (简单追加)
+  routing_strategy: 'alns'  # 使用ALNS路径优化策略
+  alns_max_iterations: 10   # 2-opt优化最大迭代次数
+  
+  # 奖励函数配置
+  reward_calculator:
+    reward_type: "dense"  # dense | sparse
+    
+    # 权重参数 - v3归一化版本（防止梯度爆炸）
+    # 目标范围：单步奖励 [-1, 1]，累计奖励 [-100, 100]
+    weight_timeout_penalty: 0.1      # 超时惩罚 (0.1 * 100 = -10.0)
+    weight_distance_cost: 0.0001     # 距离成本 (1km = -0.1)
+    weight_wait_time: 0.001          # 等待时间惩罚 (微小)
+    weight_completion_bonus: 0.5     # 完成奖励 (0.5 * 10 = +5.0)
+    weight_balanced_load: 0.5        # 负载平衡奖励
+    weight_assignment_bonus: 0.1     # 分配奖励 (+0.1)
+    
+    # 新增：里程碑奖励
+    weight_milestone_bonus: 1.0      # 里程碑奖励 (+1.0)
+    milestone_interval: 10           # 每完成10单触发一次
+    
+    # Potential-based Reward Shaping
+    use_shaping: true
+    discount_factor: 0.99  # γ (gamma)
+  
+  # 动作空间配置
+  action_space:
+    mode: "multi_discrete"  # discrete | multi_discrete | continuous（见下方说明）
+    # 支持的模式：
+    # - discrete: 为单个订单选择骑手（简单）✅ 已实现
+    # - multi_discrete: 批量为多个订单决策（复杂，推荐）✅ 已实现
+  
+  # 训练超参数 - v2优化版本
+  training:
+    # 算法选择（仅支持PPO）
+    algorithm: "PPO"
+    
+    # 训练轮数（增加到200万步，给Agent更多学习机会）
+    total_timesteps: 2000000  # 200万步
+    
+    # 学习率（降低以提升稳定性）
+    learning_rate: 0.0001  # 从0.0003降到0.0001
+    
+    # 折扣因子
+    gamma: 0.99
+    
+    # PPO特定参数 - v2优化
+    ppo:
+      n_steps: 4096        # 增加（从2048到4096），收集更多经验再更新
+      batch_size: 256      # 大幅增加（从64到256），提升训练稳定性
+      n_epochs: 10
+      gae_lambda: 0.95
+      clip_range: 0.2
+      ent_coef: 0.02       # 增加熵系数（从0.01到0.02），鼓励更多探索
+      vf_coef: 0.5         # 价值函数损失系数
+      max_grad_norm: 0.5   # 梯度裁剪阈值
+      normalize_advantage: true  # 是否归一化优势函数
+    
+    
+    # 网络架构
+    policy:
+      net_arch: [256, 256]  # 两层全连接，每层256神经元
+      activation: "relu"    # 激活函数（目前代码未使用，预留扩展）
+    
+    # 训练策略
+    training_strategy:
+      # 课程学习（从简单场景开始）
+      # 注意：启用课程学习时，algorithm必须是PPO（目前只支持PPO）
+      use_curriculum_learning: true
+      
+      # 经验回放增强（预留）
+      use_prioritized_replay: false
+      
+      # 多环境并行
+      num_parallel_envs: 4  # 并行运行4个环境加速训练
+    
+    # Day 14: 课程学习详细配置
+    # 注意：当前使用的是"简化版"课程学习（train_with_curriculum + CurriculumAdvanceCallback）
+    # 真正生效的配置项：curriculum_stages, eval_freq, n_eval_episodes, overtime_threshold,
+    #                   max_retries, extra_timesteps, failure_strategy
+    # 以下enable_fallback等配置是为"完整版"CurriculumManager预留的，目前未使用
+    curriculum:
+      # 以下配置为完整版CurriculumManager预留（目前未使用）
+      enable_fallback: true
+      fallback_threshold: 0.3  # 性能下降30%触发回退
+      max_consecutive_failures: 3  # 连续失败次数上限
+      enable_smooth_transition: true
+      transition_episodes: 10  # 阶段切换时的过渡episode数
+      
+      # 评估参数（影响达标判断的稳定性）
+      # 注意：n_eval_episodes越小，评估波动越大，可能导致频繁触发加时或提前停止
+      # 建议：中高难度阶段可适当增加n_eval_episodes（5-10）
+      eval_freq: 5000           # 评估频率（步数）
+      n_eval_episodes: 5        # 每次评估的Episode数（默认5，减少波动）
+      overtime_threshold: 0.8   # 加时赛阈值（达到目标的80%可加时）
+      max_retries: 2            # 最大加时次数
+      extra_timesteps: 50000    # 每次加时的步数
+      
+      # 失败处理策略
+      # - 'stop': 某阶段失败则停止训练（保守，默认）
+      # - 'continue': 某阶段失败仍继续后续阶段（激进，可能导致后续阶段也失败）
+      failure_strategy: 'stop'
+      
+      # 课程阶段定义（从低负载到高负载）
+      # 每个阶段可配置：
+      #   - name: 阶段名称
+      #   - description: 描述
+      #   - total_orders: 订单数
+      #   - num_couriers: 骑手数
+      #   - time_window_multiplier: 时间窗宽度倍数（>1更宽松，<1更紧迫）
+      #   - peak_rate_multiplier: 高峰到达率倍数
+      #   - timesteps: 训练步数
+      #   - advance_condition: 进阶条件（fixed_steps/performance/adaptive）
+      #   - min_completion_rate: 最小完成率阈值（用于performance模式）
+      #   - max_timeout_rate: 最大超时率阈值（用于performance模式）
+      #   - difficulty_score: 难度评分（0-1）
+      # 课程阶段定义（使用现有数据文件：100/500/1000单）
+      # 通过调整骑手数和仿真时长来控制难度
+      # 重要约束：每个阶段的num_couriers必须 <= state_encoder.max_couriers（默认50）
+      # 这是因为动作空间维度在所有阶段必须保持一致
+      # 如果某阶段num_couriers > max_couriers，训练时会抛出ValueError
+      curriculum_stages:
+        - name: "warmup"
+          description: "热身阶段：100单，运力充足（放宽条件让Agent学习）"
+          orders_file: "data/orders/uniform_grid_100.csv"
+          total_orders: 100
+          num_couriers: 20
+          simulation_duration: 43200  # 12小时
+          timesteps: 50000
+          min_completion_rate: 0.3  # 放宽：从0.7降到0.3
+          max_timeout_rate: 0.7     # 放宽：从0.3提高到0.7
+          difficulty_score: 0.1
+        
+        - name: "transition"
+          description: "过渡阶段：300单，20骑手（从100单到500单的过渡）"
+          orders_file: "data/orders/uniform_grid_300.csv"
+          total_orders: 300
+          num_couriers: 20
+          simulation_duration: 43200  # 12小时
+          timesteps: 75000
+          min_completion_rate: 0.3
+          max_timeout_rate: 0.7
+          difficulty_score: 0.2
+        
+        - name: "low_load"
+          description: "低负载阶段：500单，20骑手"
+          orders_file: "data/orders/uniform_grid_500.csv"
+          total_orders: 500
+          num_couriers: 20
+          simulation_duration: 43200  # 12小时
+          timesteps: 100000
+          min_completion_rate: 0.35  # 调整：从0.5降到0.35
+          max_timeout_rate: 0.80     # 调整：从0.65提高到0.80（放宽超时约束）
+          difficulty_score: 0.3
+        
+        - name: "medium_load"
+          description: "中负载阶段：500单，15骑手（增加压力）"
+          orders_file: "data/orders/uniform_grid_500.csv"
+          total_orders: 500
+          num_couriers: 15
+          simulation_duration: 43200  # 12小时
+          timesteps: 150000
+          min_completion_rate: 0.35
+          max_timeout_rate: 0.80
+          difficulty_score: 0.5
+        
+        - name: "high_load"
+          description: "高负载阶段：1000单，20骑手"
+          orders_file: "data/orders/uniform_grid_1000.csv"
+          total_orders: 1000
+          num_couriers: 20
+          simulation_duration: 43200  # 12小时
+          timesteps: 200000
+          min_completion_rate: 0.35
+          max_timeout_rate: 0.65
+          difficulty_score: 0.7
+        
+        - name: "extreme_load"
+          description: "极限阶段：1000单，15骑手（极限挑战）"
+          orders_file: "data/orders/uniform_grid_1000.csv"
+          total_orders: 1000
+          num_couriers: 15
+          simulation_duration: 43200  # 12小时
+          timesteps: 250000
+          min_completion_rate: 0.3
+          max_timeout_rate: 0.7
+          difficulty_score: 1.0
+  
+  # 评估配置 - v2优化
+  evaluation:
+    eval_freq: 5000   # 更频繁评估（从10000降到5000），更好监控学习进度
+    n_eval_episodes: 5  # 每次评估运行5个Episode（减少以加快训练）
+    
+    # 对比基线（TODO: 目前未在训练代码中使用，后续可接入evaluate_model或报告生成）
+    baselines:
+      - "greedy"
+      - "ortools"
+      - "alns"
+    
+    # 保存策略
+    save_best_model: true
+    save_freq: 50000  # 每50000步保存一次
+  
+  # 可视化与日志
+  logging:
+    tensorboard: true
+    log_dir: "./outputs/rl_training/logs"
+    
+    # Wandb集成（可选）
+    use_wandb: false
+    wandb_project: "on-demand-delivery-rl"
+    wandb_entity: null
+  
+  # 模型保存路径
+  model_save_path: "./outputs/rl_training/models"
+  
+  # 随机种子（可复现）
+  seed: 42
+
+# 实验场景配置
+# 注意：每个场景必须同时指定orders_file和total_orders，确保数据文件与订单数一致
+scenarios:
+  # 场景1：低负载
+  low_load:
+    orders_file: "data/orders/uniform_grid_500.csv"
+    total_orders: 500
+    num_couriers: 20
+    description: "低负载场景，订单/骑手比=25"
+  
+  # 场景2：中负载（MVP基准）
+  medium_load:
+    orders_file: "data/orders/uniform_grid_1000.csv"
+    total_orders: 1000
+    num_couriers: 20
+    description: "中负载场景，订单/骑手比=50"
+  
+  # 场景3：高负载（压力测试）
+  high_load:
+    orders_file: "data/orders/uniform_grid_1000.csv"  # 使用1000单文件，但增加骑手压力
+    total_orders: 1000
+    num_couriers: 15
+    description: "高负载场景，订单/骑手比=67"
+  
+  # 场景4：极端场景
+  extreme_load:
+    orders_file: "data/orders/uniform_grid_1000.csv"
+    total_orders: 1000
+    num_couriers: 10
+    description: "极端场景，订单/骑手比=100"
+  
+  # 场景5：运力充足
+  low_stress:
+    orders_file: "data/orders/uniform_grid_1000.csv"
+    total_orders: 1000
+    num_couriers: 40
+    description: "运力充足场景，订单/骑手比=25"
+
+# 性能基准（来自MVP实验）
+benchmarks:
+  medium_load_20_couriers:
+    greedy:
+      timeout_rate: 0.950
+      completion_rate: 0.080
+      avg_service_time: 1557.7
+    ortools:
+      timeout_rate: 0.868
+      completion_rate: 0.194
+      avg_service_time: 1313.4
+    alns:
+      timeout_rate: 0.709  # RL需要超越的目标
+      completion_rate: 0.372
+      avg_service_time: 1142.1
+  
+  # RL目标性能
+  rl_target:
+    timeout_rate: 0.65  # 目标：比ALNS降低5.9%
+    completion_rate: 0.40  # 目标：比ALNS提升2.8%
+    avg_service_time: 1100  # 目标：比ALNS降低42秒
+
+# 下一阶段工作计划
+next_steps:
+  phase_2_rl_training:
+    - "集成RL环境与仿真引擎"
+    - "实现PPO/DQN训练pipeline"
+    - "设计课程学习策略"
+    - "多场景性能评估"
+    - "与启发式算法对比"
+  
+  phase_3_advanced:
+    - "多智能体RL（骑手之间协作）"
+    - "在线学习与适应"
+    - "实际部署与A/B测试"
+    - "论文撰写与投稿"
