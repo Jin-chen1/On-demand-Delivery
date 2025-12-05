@@ -298,6 +298,139 @@ class SimulationEnvironment:
         
         # Day 22: 创建商家对象并关联订单
         self._initialize_merchants()
+    
+    def load_orders_from_raw_data(self, orders_raw: list) -> None:
+        """
+        从预加载的原始数据加载订单（性能优化）
+        
+        避免每次reset都从CSV文件读取，直接使用内存中的数据
+        
+        Args:
+            orders_raw: 订单原始数据列表（字典格式，与CSV列对应）
+        """
+        import copy
+        
+        logger.debug(f"从预加载数据加载订单: {len(orders_raw)} 条")
+        
+        # 清空现有订单
+        self.orders.clear()
+        
+        # 检测订单格式
+        if not orders_raw:
+            logger.warning("预加载订单数据为空")
+            return
+        
+        sample_row = orders_raw[0]
+        has_gps_columns = 'merchant_lat' in sample_row
+        has_node_columns = 'merchant_node' in sample_row
+        
+        # 确定使用的格式
+        if has_node_columns and not self.use_gps_coords:
+            use_gps_format = False
+        elif has_gps_columns and not has_node_columns:
+            use_gps_format = True
+            self.use_gps_coords = True
+        else:
+            use_gps_format = self.use_gps_coords
+        
+        # 检测graph中节点的类型
+        node_sample = list(self.graph.nodes())[0] if len(self.graph.nodes()) > 0 else None
+        use_str_nodes = isinstance(node_sample, str)
+        
+        for row in orders_raw:
+            if use_gps_format:
+                order_id = int(row['order_id'])
+                merchant_loc_id = f"m_{order_id}"
+                customer_loc_id = f"c_{order_id}"
+                
+                merchant_coords = (float(row['merchant_lat']), float(row['merchant_lng']))
+                customer_coords = (float(row['customer_lat']), float(row['customer_lng']))
+                self.gps_coords[merchant_loc_id] = merchant_coords
+                self.gps_coords[customer_loc_id] = customer_coords
+                
+                arrival = float(row['arrival_time'])
+                prep_time = float(row['preparation_time'])
+                
+                pickup_time = float(row.get('earliest_pickup_time', arrival + prep_time))
+                delivery_time = float(row.get('latest_delivery_time', 
+                                             row.get('deadline', arrival + float(row['delivery_window']))))
+                
+                order = Order(
+                    order_id=order_id,
+                    arrival_time=arrival,
+                    merchant_node=merchant_loc_id,
+                    customer_node=customer_loc_id,
+                    merchant_coords=merchant_coords,
+                    customer_coords=customer_coords,
+                    preparation_time=prep_time,
+                    delivery_window=float(row['delivery_window']),
+                    earliest_pickup_time=pickup_time,
+                    latest_delivery_time=delivery_time
+                )
+            else:
+                # 路网节点格式
+                merchant_node = str(int(row['merchant_node'])) if use_str_nodes else int(row['merchant_node'])
+                customer_node = str(int(row['customer_node'])) if use_str_nodes else int(row['customer_node'])
+                
+                # 获取坐标
+                if 'merchant_coords' in row:
+                    coords_str = row['merchant_coords']
+                    if isinstance(coords_str, str):
+                        coords_str = coords_str.strip('()')
+                        x, y = map(float, coords_str.split(','))
+                        merchant_coords = (x, y)
+                    else:
+                        merchant_coords = coords_str
+                    
+                    coords_str = row['customer_coords']
+                    if isinstance(coords_str, str):
+                        coords_str = coords_str.strip('()')
+                        x, y = map(float, coords_str.split(','))
+                        customer_coords = (x, y)
+                    else:
+                        customer_coords = coords_str
+                elif has_gps_columns:
+                    merchant_coords = (float(row['merchant_lat']), float(row['merchant_lng']))
+                    customer_coords = (float(row['customer_lat']), float(row['customer_lng']))
+                else:
+                    try:
+                        m_data = self.graph.nodes[merchant_node]
+                        c_data = self.graph.nodes[customer_node]
+                        merchant_coords = (float(m_data['y']), float(m_data['x']))
+                        customer_coords = (float(c_data['y']), float(c_data['x']))
+                    except (KeyError, TypeError):
+                        merchant_coords = (0.0, 0.0)
+                        customer_coords = (0.0, 0.0)
+                
+                arrival = float(row['arrival_time'])
+                prep_time = float(row['preparation_time'])
+                pickup_time = float(row.get('earliest_pickup_time', arrival + prep_time))
+                delivery_time = float(row.get('latest_delivery_time',
+                                             row.get('deadline', arrival + float(row['delivery_window']))))
+                
+                order = Order(
+                    order_id=int(row['order_id']),
+                    arrival_time=arrival,
+                    merchant_node=merchant_node,
+                    customer_node=customer_node,
+                    merchant_coords=merchant_coords,
+                    customer_coords=customer_coords,
+                    preparation_time=prep_time,
+                    delivery_window=float(row['delivery_window']),
+                    earliest_pickup_time=pickup_time,
+                    latest_delivery_time=delivery_time
+                )
+            
+            self.orders[order.order_id] = order
+        
+        self.stats['total_orders'] = len(self.orders)
+        logger.debug(f"从预加载数据加载了 {len(self.orders)} 个订单")
+        
+        # 自动调整订单时间到仿真范围内
+        self._adjust_order_arrival_times()
+        
+        # Day 22: 创建商家对象并关联订单
+        self._initialize_merchants()
 
     def _adjust_order_arrival_times(self):
         """

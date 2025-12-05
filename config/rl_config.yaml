@@ -37,16 +37,23 @@ rl:
   reward_calculator:
     reward_type: "dense"  # dense | sparse
     
-    # 权重参数 - v3归一化版本（防止梯度爆炸）
-    # 目标范围：单步奖励 [-1, 1]，累计奖励 [-100, 100]
-    weight_timeout_penalty: 0.1      # 超时惩罚 (0.1 * 100 = -10.0)
-    weight_distance_cost: 0.0001     # 距离成本 (1km = -0.1)
-    weight_wait_time: 0.001          # 等待时间惩罚 (微小)
-    weight_completion_bonus: 0.5     # 完成奖励 (0.5 * 10 = +5.0)
+    # 权重参数 - v4优化版本（方案B：增强关键信号）
+    # 目标范围：单步奖励 [-2, 2]，累计奖励 [-200, 200]
+    weight_timeout_penalty: 0.2      # 超时惩罚（增加2倍）
+    weight_distance_cost: 0.001      # 距离成本（增加10倍，1km = -1.0）
+    weight_wait_time: 0.001          # 等待时间惩罚
+    weight_completion_bonus: 0.5     # 完成奖励
     weight_balanced_load: 0.5        # 负载平衡奖励
-    weight_assignment_bonus: 0.1     # 分配奖励 (+0.1)
+    weight_assignment_bonus: 0.2     # 分配奖励（增加2倍）
     
-    # 新增：里程碑奖励
+    # v4新增：方案A - 延迟派单惩罚（防止Agent滥用延迟）
+    weight_delay_penalty: 0.05       # 每个待分配订单的延迟惩罚
+    weight_urgent_delay_penalty: 0.2 # 紧急订单（30分钟内）延迟的额外惩罚
+    
+    # v4新增：方案C - 紧急订单优先奖励
+    weight_urgent_assignment: 0.5    # 分配紧急订单的额外奖励（最高+0.5）
+    
+    # 里程碑奖励
     weight_milestone_bonus: 1.0      # 里程碑奖励 (+1.0)
     milestone_interval: 10           # 每完成10单触发一次
     
@@ -56,10 +63,15 @@ rl:
   
   # 动作空间配置
   action_space:
-    mode: "multi_discrete"  # discrete | multi_discrete | continuous（见下方说明）
+    mode: "multi_discrete"  # discrete | multi_discrete
     # 支持的模式：
     # - discrete: 为单个订单选择骑手（简单）✅ 已实现
     # - multi_discrete: 批量为多个订单决策（复杂，推荐）✅ 已实现
+  
+  # 动作屏蔽配置（Action Masking）
+  # 使用MaskablePPO屏蔽无效动作（如满载骑手），提升训练效率
+  # 需要安装sb3-contrib: pip install sb3-contrib
+  use_action_masking: true  # 启用动作屏蔽（推荐）
   
   # 训练超参数 - v2优化版本
   training:
@@ -90,8 +102,18 @@ rl:
     
     # 网络架构
     policy:
-      net_arch: [256, 256]  # 两层全连接，每层256神经元
+      net_arch: [256, 256]  # MLP模式：两层全连接，每层256神经元
       activation: "relu"    # 激活函数（目前代码未使用，预留扩展）
+      
+      # Attention网络配置（推荐用于复杂场景）
+      # 使用Transformer架构处理变长订单序列，具有排列不变性
+      use_attention: false  # 是否使用Attention网络（true=Attention, false=MLP）
+      attention:
+        d_model: 64         # Transformer隐藏维度
+        num_heads: 4        # 注意力头数
+        num_layers: 2       # Transformer层数
+        features_dim: 128   # 输出特征维度
+        dropout: 0.1        # Dropout率
     
     # 训练策略
     training_strategy:

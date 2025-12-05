@@ -18,6 +18,13 @@ except ImportError:
     SB3_AVAILABLE = False
     logger.warning("Stable-Baselines3不可用，RLDispatcher将回退到Greedy策略")
 
+# 尝试导入MaskablePPO（需要sb3-contrib）
+try:
+    from sb3_contrib import MaskablePPO
+    MASKABLE_PPO_AVAILABLE = True
+except ImportError:
+    MASKABLE_PPO_AVAILABLE = False
+
 # 导入状态编码器
 try:
     from src.rl.state_representation import StateEncoder
@@ -90,6 +97,9 @@ class RLDispatcher:
         self.fallback_decisions = 0
         self.route_optimizations = 0
         
+        # 动作屏蔽标志（在_load_model中设置）
+        self.use_action_masking = False
+        
         # 加载模型
         if model_path and SB3_AVAILABLE:
             self._load_model(model_path)
@@ -105,7 +115,9 @@ class RLDispatcher:
     
     def _load_model(self, model_path: str) -> bool:
         """
-        加载训练好的PPO模型
+        加载训练好的PPO/MaskablePPO模型
+        
+        自动检测模型类型，优先尝试MaskablePPO
         
         Args:
             model_path: 模型路径
@@ -115,20 +127,34 @@ class RLDispatcher:
         """
         try:
             path = Path(model_path)
-            if path.exists():
-                self.model = PPO.load(str(path))
-                logger.info(f"成功加载RL模型: {path}")
-                return True
-            else:
+            if not path.exists():
                 # 尝试添加.zip后缀
                 zip_path = Path(str(model_path) + '.zip')
                 if zip_path.exists():
-                    self.model = PPO.load(str(zip_path))
-                    logger.info(f"成功加载RL模型: {zip_path}")
-                    return True
+                    path = zip_path
                 else:
                     logger.error(f"模型文件不存在: {model_path}")
                     return False
+            
+            # 检查是否启用动作屏蔽
+            use_action_masking = self.config.get('use_action_masking', False)
+            
+            if use_action_masking and MASKABLE_PPO_AVAILABLE:
+                # 尝试加载MaskablePPO模型
+                try:
+                    self.model = MaskablePPO.load(str(path))
+                    self.use_action_masking = True
+                    logger.info(f"成功加载MaskablePPO模型: {path}")
+                    return True
+                except Exception as e:
+                    logger.warning(f"MaskablePPO加载失败，尝试标准PPO: {e}")
+            
+            # 加载标准PPO模型
+            self.model = PPO.load(str(path))
+            self.use_action_masking = False
+            logger.info(f"成功加载PPO模型: {path}")
+            return True
+            
         except Exception as e:
             logger.error(f"加载模型失败: {e}")
             return False
@@ -175,6 +201,10 @@ class RLDispatcher:
         - discrete: 为单个订单选择骑手
         - multi_discrete: 批量为多个订单决策（训练时使用的模式）
         
+        支持动作屏蔽（MaskablePPO）：
+        - 如果启用动作屏蔽，会计算当前状态的有效动作掩码
+        - 模型只会在有效动作中选择，避免选择满载骑手
+        
         Returns:
             成功分配的订单数
         """
@@ -188,7 +218,13 @@ class RLDispatcher:
         observation = self._encode_state()
         
         # 使用模型预测动作
-        action, _ = self.model.predict(observation, deterministic=True)
+        if self.use_action_masking:
+            # MaskablePPO需要传入动作掩码
+            action_mask = self._get_action_mask(pending_copy)
+            action, _ = self.model.predict(observation, deterministic=True, action_masks=action_mask)
+        else:
+            # 标准PPO
+            action, _ = self.model.predict(observation, deterministic=True)
         
         # 检查动作类型（multi_discrete返回数组，discrete返回标量）
         if isinstance(action, np.ndarray) and action.ndim > 0 and len(action) > 1:
@@ -334,6 +370,50 @@ class RLDispatcher:
         state_vector = self.state_encoder.encode(env_state)
         
         return state_vector
+    
+    def _get_action_mask(self, pending_orders: List[int]) -> np.ndarray:
+        """
+        获取当前状态的动作掩码
+        
+        用于MaskablePPO，屏蔽无效动作（如满载骑手）
+        
+        Args:
+            pending_orders: 当前待分配订单列表
+            
+        Returns:
+            对于multi_discrete模式: shape=(max_pending_orders, max_couriers+1) 的布尔数组
+            对于discrete模式: shape=(max_couriers+1,) 的布尔数组
+        """
+        couriers = list(self.env.couriers.values())
+        num_couriers = len(couriers)
+        num_pending = len(pending_orders)
+        
+        # 计算每个骑手的剩余容量
+        courier_available = {}
+        for i, courier in enumerate(couriers):
+            if i < self.max_couriers:
+                courier_available[i] = courier.can_accept_new_order()
+        
+        # 检测动作空间模式（根据模型的action_space判断）
+        # multi_discrete模式
+        mask = np.zeros((self.max_pending_orders, self.max_couriers + 1), dtype=bool)
+        
+        # 动作0（延迟/无操作）始终有效
+        mask[:, 0] = True
+        
+        # 为每个订单槽位设置掩码
+        for order_idx in range(self.max_pending_orders):
+            if order_idx >= num_pending:
+                # 没有订单的槽位，只有延迟动作有效
+                continue
+            
+            # 检查每个骑手是否可用
+            for courier_idx, available in courier_available.items():
+                if available:
+                    # 骑手索引+1（因为0是延迟动作）
+                    mask[order_idx, courier_idx + 1] = True
+        
+        return mask
     
     def _get_geographic_bounds(self) -> tuple:
         """

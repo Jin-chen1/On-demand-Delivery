@@ -417,6 +417,16 @@ class DeliveryRLEnvironment(gym.Env):
                     logger.warning(f"部分节点不在GraphML中: {len(valid_nodes)} -> {len(actual_nodes)}")
                 self._cached_static_data['graph'] = graph.subgraph(actual_nodes).copy()
             
+            # === 优化1: 预加载订单数据 ===
+            # 订单文件在__init__时加载一次，reset时使用深拷贝
+            orders_file = Path(self.simulation_config.get('orders_file', 'data/orders/orders.csv'))
+            if orders_file.exists():
+                self._cached_static_data['orders_raw'] = self._load_orders_from_csv(orders_file)
+                logger.info(f"  订单数据: {len(self._cached_static_data['orders_raw'])} 条")
+            else:
+                self._cached_static_data['orders_raw'] = None
+                logger.warning(f"  订单文件不存在: {orders_file}")
+            
             logger.info("静态数据预加载完成")
             
         except Exception as e:
@@ -454,12 +464,13 @@ class DeliveryRLEnvironment(gym.Env):
         logger.debug("创建仿真环境实例（使用缓存数据）")
         
         # === 性能优化：使用预加载的缓存数据 ===
-        # 注意：graph需要copy()，因为仿真可能修改图结构
-        # distance_matrix和time_matrix是只读的，直接传引用
-        graph = self._cached_static_data['graph'].copy()
+        # 优化2: 减少图复制开销
+        # 仿真环境不会修改图结构，直接传引用（节省~10ms/reset）
+        # 如果未来仿真需要修改图，再改回copy()
+        graph = self._cached_static_data['graph']
         distance_matrix = self._cached_static_data['distance_matrix']
         time_matrix = self._cached_static_data['time_matrix']
-        # node_mapping需要深拷贝，因为仿真可能修改
+        # node_mapping需要浅拷贝（仿真可能添加新节点）
         node_mapping = {
             k: (v.copy() if isinstance(v, (dict, list)) else v)
             for k, v in self._cached_static_data['node_mapping'].items()
@@ -476,13 +487,18 @@ class DeliveryRLEnvironment(gym.Env):
             config=rl_sim_config
         )
         
-        # 加载订单
-        orders_file = Path(self.simulation_config.get('orders_file', 'data/orders/orders.csv'))
-        if orders_file.exists():
-            self.sim_env.load_orders_from_csv(orders_file)
+        # === 优化1: 使用预加载的订单数据 ===
+        # 如果有预加载的订单数据，直接使用（避免每次reset都读取CSV）
+        if self._cached_static_data.get('orders_raw') is not None:
+            self.sim_env.load_orders_from_raw_data(self._cached_static_data['orders_raw'])
         else:
-            logger.warning(f"订单文件不存在: {orders_file}")
-            raise FileNotFoundError(f"订单文件不存在: {orders_file}")
+            # 回退：从文件加载
+            orders_file = Path(self.simulation_config.get('orders_file', 'data/orders/orders.csv'))
+            if orders_file.exists():
+                self.sim_env.load_orders_from_csv(orders_file)
+            else:
+                logger.warning(f"订单文件不存在: {orders_file}")
+                raise FileNotFoundError(f"订单文件不存在: {orders_file}")
         
         # 注意：SimulationEnvironment.load_orders_from_csv 已自动调整订单到达时间
         
@@ -537,6 +553,110 @@ class DeliveryRLEnvironment(gym.Env):
                 graph.add_edge(j, i, length=dist)
         
         return graph
+    
+    def _load_orders_from_csv(self, orders_file: Path) -> list:
+        """
+        从CSV文件加载订单原始数据（用于预加载缓存）
+        
+        Args:
+            orders_file: 订单CSV文件路径
+        
+        Returns:
+            订单原始数据列表（字典格式）
+        """
+        import pandas as pd
+        
+        try:
+            df = pd.read_csv(orders_file)
+            orders_raw = df.to_dict('records')
+            return orders_raw
+        except Exception as e:
+            logger.error(f"加载订单文件失败: {e}")
+            return []
+    
+    def action_masks(self) -> np.ndarray:
+        """
+        返回当前状态下的动作掩码（Action Mask）
+        
+        用于MaskablePPO，屏蔽无效动作（如满载骑手）
+        
+        Returns:
+            对于discrete模式: shape=(max_couriers+1,) 的布尔数组
+            对于multi_discrete模式: shape=(max_pending_orders, max_couriers+1) 的布尔数组
+        """
+        if self.action_mode == 'discrete':
+            return self._get_discrete_action_mask()
+        elif self.action_mode == 'multi_discrete':
+            return self._get_multi_discrete_action_mask()
+        else:
+            # continuous模式不支持动作屏蔽
+            raise NotImplementedError(f"动作屏蔽不支持{self.action_mode}模式")
+    
+    def _get_discrete_action_mask(self) -> np.ndarray:
+        """
+        获取discrete模式的动作掩码
+        
+        Returns:
+            shape=(max_couriers+1,) 的布尔数组
+            mask[0] = True (延迟动作始终有效)
+            mask[i] = True 如果骑手i有空余容量
+        """
+        mask = np.zeros(self.max_couriers + 1, dtype=bool)
+        
+        # 动作0（延迟派单）始终有效
+        mask[0] = True
+        
+        if not self.sim_env:
+            return mask
+        
+        # 检查每个骑手是否有空余容量
+        for courier_id, courier in self.sim_env.couriers.items():
+            if courier_id <= self.max_couriers:
+                if len(courier.assigned_orders) < courier.max_capacity:
+                    mask[courier_id] = True
+        
+        return mask
+    
+    def _get_multi_discrete_action_mask(self) -> np.ndarray:
+        """
+        获取multi_discrete模式的动作掩码
+        
+        Returns:
+            shape=(max_pending_orders, max_couriers+1) 的布尔数组
+            每行对应一个订单槽位的有效动作
+        """
+        mask = np.zeros((self.max_pending_orders, self.max_couriers + 1), dtype=bool)
+        
+        # 动作0（延迟/无操作）始终有效
+        mask[:, 0] = True
+        
+        if not self.sim_env:
+            return mask
+        
+        # 获取当前待分配订单数
+        num_pending = len(self.sim_env.pending_orders)
+        
+        # 计算每个骑手的剩余容量
+        courier_remaining_capacity = {}
+        for courier_id, courier in self.sim_env.couriers.items():
+            if courier_id <= self.max_couriers:
+                remaining = courier.max_capacity - len(courier.assigned_orders)
+                courier_remaining_capacity[courier_id] = remaining
+        
+        # 为每个订单槽位设置掩码
+        # 注意：需要考虑前面订单分配后对容量的影响
+        # 这里使用保守估计：假设每个订单都可能分配给任何有容量的骑手
+        for order_idx in range(self.max_pending_orders):
+            if order_idx >= num_pending:
+                # 没有订单的槽位，只有延迟动作有效
+                continue
+            
+            # 检查每个骑手是否可用
+            for courier_id, remaining in courier_remaining_capacity.items():
+                if remaining > 0:
+                    mask[order_idx, courier_id] = True
+        
+        return mask
     
     def _execute_action(self, action: Any) -> Dict[str, Any]:
         """

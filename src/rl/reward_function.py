@@ -31,14 +31,21 @@ class RewardCalculator:
         self.config = config or {}
         
         # 权重参数（可调节以平衡不同目标）
-        # v3优化：大幅降低默认值，防止梯度爆炸
-        self.weight_timeout_penalty = self.config.get('weight_timeout_penalty', 0.1)
-        self.weight_distance_cost = self.config.get('weight_distance_cost', 0.0001)
+        # v4优化：方案B - 调整权重比例，增强关键信号
+        self.weight_timeout_penalty = self.config.get('weight_timeout_penalty', 0.2)  # 增加2倍
+        self.weight_distance_cost = self.config.get('weight_distance_cost', 0.001)    # 增加10倍
         self.weight_wait_time = self.config.get('weight_wait_time', 0.001)
         self.weight_completion_bonus = self.config.get('weight_completion_bonus', 0.5)
         self.weight_balanced_load = self.config.get('weight_balanced_load', 0.5)
-        # 新增：成功分配订单的即时奖励
-        self.weight_assignment_bonus = self.config.get('weight_assignment_bonus', 0.1)
+        # 成功分配订单的即时奖励
+        self.weight_assignment_bonus = self.config.get('weight_assignment_bonus', 0.2)  # 增加2倍
+        
+        # v4新增：方案A - 延迟派单惩罚权重
+        self.weight_delay_penalty = self.config.get('weight_delay_penalty', 0.05)  # 每个待分配订单的惩罚
+        self.weight_urgent_delay_penalty = self.config.get('weight_urgent_delay_penalty', 0.2)  # 紧急订单延迟惩罚
+        
+        # v4新增：方案C - 紧急订单优先奖励
+        self.weight_urgent_assignment = self.config.get('weight_urgent_assignment', 0.5)  # 紧急订单分配奖励
         
         # v2新增：里程碑奖励（每完成一定数量订单给予额外奖励）
         self.weight_milestone_bonus = self.config.get('weight_milestone_bonus', 1.0)
@@ -60,11 +67,14 @@ class RewardCalculator:
         self.total_merchant_wait_time = 0.0
         self.merchant_wait_count = 0
         
-        logger.info("RewardCalculator初始化完成")
+        logger.info("RewardCalculator初始化完成 (v4优化版)")
         logger.info(f"  奖励类型: {self.reward_type}")
-        logger.info(f"  完成奖励权重: {self.weight_completion_bonus}")
+        logger.info(f"  超时惩罚权重: {self.weight_timeout_penalty}")
+        logger.info(f"  距离成本权重: {self.weight_distance_cost}")
         logger.info(f"  分配奖励权重: {self.weight_assignment_bonus}")
-        logger.info(f"  里程碑奖励权重: {self.weight_milestone_bonus} (每{self.milestone_interval}单)")
+        logger.info(f"  延迟惩罚权重: {self.weight_delay_penalty} (紧急: {self.weight_urgent_delay_penalty})")
+        logger.info(f"  紧急分配奖励: {self.weight_urgent_assignment}")
+        logger.info(f"  里程碑奖励: {self.weight_milestone_bonus} (每{self.milestone_interval}单)")
     
     def calculate_step_reward(self,
                              state_before: Dict[str, Any],
@@ -176,34 +186,63 @@ class RewardCalculator:
         if 'completed_orders' in info:
             reward += self._calculate_sparse_reward(info) / 10.0  # 缩小幅度
         
-        # 6. 特殊奖励：预留运力行为
-        # 如果Agent选择"延迟派单"，且后续证明有效，给予奖励
-        # 注意：delay_justified需要SimulationEnvironment.step()返回，目前是预留接口
-        # 实现思路：当延迟派单后，如果在下一个调度周期内有更优的骑手可用，则认为延迟有效
-        if action.get('action_type') == 'delay' and info.get('delay_justified', False):
-            reward += 2.0
+        # 6. 延迟派单惩罚（方案A）
+        # 防止Agent滥用延迟派单来避免负奖励
+        if action.get('action_type') == 'delay':
+            pending_orders = state_after.get('pending_orders', [])
+            pending_count = len(pending_orders)
+            
+            # 基础延迟惩罚：待分配订单越多，惩罚越大
+            delay_penalty = self.weight_delay_penalty * pending_count
+            reward -= delay_penalty
+            
+            # 额外惩罚：如果有紧急订单（30分钟内到期）却选择延迟
+            current_time = state_after.get('current_time', 0)
+            urgent_count = sum(1 for order in pending_orders 
+                              if hasattr(order, 'latest_delivery_time') and 
+                              order.latest_delivery_time - current_time < 1800)
+            if urgent_count > 0:
+                reward -= self.weight_urgent_delay_penalty * urgent_count
+            
+            # 如果延迟被证明有效（后续有更优骑手），给予补偿奖励
+            if info.get('delay_justified', False):
+                reward += 2.0
         
-        # 7. 新增：成功分配订单的即时奖励（鼓励及时分配而非延迟）
+        # 7. 成功分配订单的即时奖励（鼓励及时分配而非延迟）
         if action.get('action_type') in ['assign', 'assign_fallback']:
             reward += self.weight_assignment_bonus
-            # 如果使用回退机制分配，给予惩罚（而非奖励）
-            # 这鼓励Agent学习选择有效的骑手ID，而非依赖回退机制
+            # 如果使用回退机制分配，给予惩罚
             if action.get('action_type') == 'assign_fallback':
-                reward -= self.weight_assignment_bonus * 0.3  # 惩罚无效动作
+                reward -= self.weight_assignment_bonus * 0.3
+            
+            # 方案C：紧急订单优先奖励
+            # 如果分配的是紧急订单（30分钟内到期），给予额外奖励
+            order_info = action.get('order_info', {})
+            time_to_deadline = order_info.get('time_to_deadline', float('inf'))
+            if time_to_deadline < 1800:  # 30分钟内
+                urgency_bonus = self.weight_urgent_assignment * (1 - time_to_deadline / 1800)
+                reward += urgency_bonus
         
         # 7.1 multi_discrete模式下的批量分配奖励
-        # multi_assign返回的assignments是一个列表，每个元素是一次成功分配
         if action.get('action_type') == 'multi_assign':
             assignments = action.get('assignments', [])
+            current_time = state_after.get('current_time', 0)
+            
             for assignment in assignments:
                 # 每个成功分配都给予奖励
                 reward += self.weight_assignment_bonus
-                # 如果是回退分配，给予较小的奖励（而非额外奖励）
-                # 这样Agent会倾向于选择有效的骑手ID，而非依赖回退机制
+                
+                # 回退分配惩罚
                 if assignment.get('is_fallback', False):
-                    # 回退分配的奖励减半，作为对无效动作的隐式惩罚
-                    # 这鼓励Agent学习选择有效的骑手ID
                     reward -= self.weight_assignment_bonus * 0.3
+                
+                # 方案C：紧急订单优先奖励
+                order = assignment.get('order')
+                if order and hasattr(order, 'latest_delivery_time'):
+                    time_to_deadline = order.latest_delivery_time - current_time
+                    if time_to_deadline < 1800:  # 30分钟内
+                        urgency_bonus = self.weight_urgent_assignment * (1 - time_to_deadline / 1800)
+                        reward += urgency_bonus
         
         # === Day 23: 商家等餐时间惩罚 ===
         reward += self._calculate_merchant_wait_penalty(state_after, action, info)

@@ -58,9 +58,19 @@ if SB3_AVAILABLE:
     )
     from stable_baselines3.common.logger import configure
     from stable_baselines3.common.monitor import Monitor
+    
+    # 尝试导入MaskablePPO（需要sb3-contrib）
+    try:
+        from sb3_contrib import MaskablePPO
+        from sb3_contrib.common.wrappers import ActionMasker
+        MASKABLE_PPO_AVAILABLE = True
+    except ImportError:
+        MASKABLE_PPO_AVAILABLE = False
+        logger.warning("sb3-contrib未安装，MaskablePPO不可用。安装命令：pip install sb3-contrib")
 else:
     print("警告：Stable-Baselines3未安装，RL训练功能不可用")
     print("安装命令：pip install stable-baselines3[extra]")
+    MASKABLE_PPO_AVAILABLE = False
 
 from gymnasium import spaces
 from .rl_environment import DeliveryRLEnvironment
@@ -791,12 +801,53 @@ class RLTrainer:
         env.close()
         logger.info("环境已关闭")
     
-    def _create_ppo_model(self, env):
-        """创建PPO模型"""
+    def _create_ppo_model(self, env, use_action_masking: bool = None):
+        """
+        创建PPO模型
+        
+        Args:
+            env: 训练环境
+            use_action_masking: 是否使用动作屏蔽（MaskablePPO）
+                               如果为None，从配置文件读取
+        
+        Returns:
+            PPO或MaskablePPO模型
+        """
         ppo_config = self.training_config.get('ppo', {})
         policy_config = self.training_config.get('policy', {})
         
-        model = PPO(
+        # 确定是否使用动作屏蔽
+        if use_action_masking is None:
+            use_action_masking = self.rl_config.get('use_action_masking', False)
+        
+        # 确定是否使用Attention网络
+        use_attention = policy_config.get('use_attention', False)
+        
+        # 构建policy_kwargs
+        if use_attention:
+            # 使用Attention特征提取器
+            try:
+                from .attention_network import create_attention_policy_kwargs
+                attention_config = policy_config.get('attention', {})
+                policy_kwargs = create_attention_policy_kwargs(
+                    max_orders=self.rl_config.get('state_encoder', {}).get('max_pending_orders', 50),
+                    max_couriers=self.rl_config.get('state_encoder', {}).get('max_couriers', 50),
+                    d_model=attention_config.get('d_model', 64),
+                    num_heads=attention_config.get('num_heads', 4),
+                    num_layers=attention_config.get('num_layers', 2),
+                    features_dim=attention_config.get('features_dim', 128),
+                    dropout=attention_config.get('dropout', 0.1)
+                )
+                logger.info("  使用Attention网络架构")
+            except ImportError as e:
+                logger.warning(f"  无法导入Attention网络: {e}，回退到MLP")
+                policy_kwargs = dict(net_arch=policy_config.get('net_arch', [256, 256]))
+        else:
+            # 使用标准MLP
+            policy_kwargs = dict(net_arch=policy_config.get('net_arch', [256, 256]))
+        
+        # 公共参数
+        common_kwargs = dict(
             policy="MlpPolicy",
             env=env,
             learning_rate=self.training_config.get('learning_rate', 3e-4),
@@ -809,13 +860,22 @@ class RLTrainer:
             ent_coef=ppo_config.get('ent_coef', 0.01),
             vf_coef=ppo_config.get('vf_coef', 0.5),
             max_grad_norm=ppo_config.get('max_grad_norm', 0.5),
-            normalize_advantage=ppo_config.get('normalize_advantage', True),
-            policy_kwargs=dict(
-                net_arch=policy_config.get('net_arch', [256, 256])
-            ),
+            policy_kwargs=policy_kwargs,
             verbose=1,
             seed=self.rl_config.get('seed', self.config.get('seed', 42))
         )
+        
+        if use_action_masking and MASKABLE_PPO_AVAILABLE:
+            # 使用MaskablePPO（动作屏蔽）
+            logger.info("  使用MaskablePPO（动作屏蔽已启用）")
+            model = MaskablePPO(**common_kwargs)
+        else:
+            if use_action_masking and not MASKABLE_PPO_AVAILABLE:
+                logger.warning("  配置启用了动作屏蔽，但sb3-contrib未安装，回退到标准PPO")
+            # 使用标准PPO
+            # 标准PPO支持normalize_advantage参数
+            common_kwargs['normalize_advantage'] = ppo_config.get('normalize_advantage', True)
+            model = PPO(**common_kwargs)
         
         return model
     
@@ -1170,10 +1230,16 @@ class RLTrainer:
         
         logger.info(f"加载模型: {model_path}")
         
-        # 加载PPO模型
+        # 加载模型（自动检测是PPO还是MaskablePPO）
         # 注意：这里没有传env给load()，因为评估只需要policy进行predict
         # 如果后续需要继续训练（.learn()）或获取环境（.get_env()），需要先调用model.set_env()
-        model = PPO.load(model_path)
+        use_action_masking = self.rl_config.get('use_action_masking', False)
+        if use_action_masking and MASKABLE_PPO_AVAILABLE:
+            model = MaskablePPO.load(model_path)
+            logger.info("  加载MaskablePPO模型")
+        else:
+            model = PPO.load(model_path)
+            logger.info("  加载标准PPO模型")
         
         # 创建评估环境（独立于模型，仅用于采集轨迹）
         env = self.create_env()
