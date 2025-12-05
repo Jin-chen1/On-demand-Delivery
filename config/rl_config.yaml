@@ -68,10 +68,13 @@ rl:
     # - discrete: 为单个订单选择骑手（简单）✅ 已实现
     # - multi_discrete: 批量为多个订单决策（复杂，推荐）✅ 已实现
   
-  # 动作屏蔽配置（Action Masking）
+  # ============================================================
+  # 关键配置：动作屏蔽（Action Masking）
+  # ============================================================
   # 使用MaskablePPO屏蔽无效动作（如满载骑手），提升训练效率
   # 需要安装sb3-contrib: pip install sb3-contrib
-  use_action_masking: true  # 启用动作屏蔽（推荐）
+  # 【重要】设为false会回退到标准PPO，无效动作问题会重现
+  use_action_masking: true  # ✅ 必须为true才能启用MaskablePPO
   
   # 训练超参数 - v2优化版本
   training:
@@ -100,14 +103,17 @@ rl:
       normalize_advantage: true  # 是否归一化优势函数
     
     
-    # 网络架构
+    # ============================================================
+    # 关键配置：网络架构
+    # ============================================================
     policy:
       net_arch: [256, 256]  # MLP模式：两层全连接，每层256神经元
       activation: "relu"    # 激活函数（目前代码未使用，预留扩展）
       
       # Attention网络配置（推荐用于复杂场景）
       # 使用Transformer架构处理变长订单序列，具有排列不变性
-      use_attention: false  # 是否使用Attention网络（true=Attention, false=MLP）
+      # 【重要】设为true启用Attention，解决稀疏信号和排列不变性问题
+      use_attention: true   # ✅ 推荐为true，启用Transformer架构
       attention:
         d_model: 64         # Transformer隐藏维度
         num_heads: 4        # 注意力头数
