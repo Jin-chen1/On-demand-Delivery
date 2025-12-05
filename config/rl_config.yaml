@@ -76,7 +76,14 @@ rl:
   # 【重要】设为false会回退到标准PPO，无效动作问题会重现
   use_action_masking: true  # ✅ 必须为true才能启用MaskablePPO
   
-  # 训练超参数 - v2优化版本
+  # ============================================================
+  # 训练超参数 - v3 Attention优化版本
+  # ============================================================
+  # 针对Transformer架构优化：
+  # - 降低学习率（Transformer对学习率敏感）
+  # - 增大Batch Size（提升训练稳定性）
+  # - 增加熵系数（防止Attention过早收敛）
+  # ============================================================
   training:
     # 算法选择（仅支持PPO）
     algorithm: "PPO"
@@ -84,20 +91,21 @@ rl:
     # 训练轮数（增加到200万步，给Agent更多学习机会）
     total_timesteps: 2000000  # 200万步
     
-    # 学习率（降低以提升稳定性）
-    learning_rate: 0.0001  # 从0.0003降到0.0001
+    # 学习率（针对Transformer降低，提升稳定性）
+    # 【重要】如果训练曲线震荡，可进一步降低到5e-5
+    learning_rate: 0.00005  # 从0.0001降到5e-5，适配Transformer
     
     # 折扣因子
     gamma: 0.99
     
-    # PPO特定参数 - v2优化
+    # PPO特定参数 - v3 Attention优化
     ppo:
-      n_steps: 4096        # 增加（从2048到4096），收集更多经验再更新
-      batch_size: 256      # 大幅增加（从64到256），提升训练稳定性
+      n_steps: 8192        # 增加（从4096到8192），Transformer需要更多样本
+      batch_size: 512      # 大幅增加（从256到512），提升Transformer训练稳定性
       n_epochs: 10
       gae_lambda: 0.95
       clip_range: 0.2
-      ent_coef: 0.02       # 增加熵系数（从0.01到0.02），鼓励更多探索
+      ent_coef: 0.05       # 增加熵系数（从0.02到0.05），防止Attention过早收敛
       vf_coef: 0.5         # 价值函数损失系数
       max_grad_norm: 0.5   # 梯度裁剪阈值
       normalize_advantage: true  # 是否归一化优势函数

@@ -23,6 +23,15 @@ class StateEncoder:
     将复杂的仿真状态转换为固定维度的向量
     """
     
+    # ============================================================
+    # 状态向量维度常量（供AttentionFeaturesExtractor引用）
+    # 修改这些常量时，AttentionFeaturesExtractor会自动同步
+    # ============================================================
+    TIME_DIM = 3           # 时间特征维度: [归一化时间, sin, cos]
+    GLOBAL_DIM = 7         # 全局特征维度: [订单数, 空闲骑手, 忙碌骑手, 比例, 风险, 商家利用率, 等餐时间]
+    ORDER_FEATURE_DIM = 9  # 每个订单的特征维度
+    COURIER_FEATURE_DIM = 4  # 每个骑手的特征维度
+    
     def __init__(self, config: Optional[Dict[str, Any]] = None):
         """
         初始化状态编码器
@@ -52,25 +61,27 @@ class StateEncoder:
         """
         计算状态空间总维度
         
+        使用类常量确保与AttentionFeaturesExtractor同步
+        
         Returns:
             状态向量维度
         """
         dim = 0
         
-        # 1. 时间特征 (3维)
-        dim += 3  # [当前时间归一化, sin(time_of_day), cos(time_of_day)]
+        # 1. 时间特征 (使用类常量TIME_DIM)
+        dim += self.TIME_DIM  # [当前时间归一化, sin(time_of_day), cos(time_of_day)]
         
-        # 2. 全局特征 (5维 + 2维商家特征 = 7维)
-        dim += 7  # [待分配订单数, 空闲骑手数, 忙碌骑手数, 订单/骑手比, 平均超时风险, 平均商家利用率, 平均等餐时间]
+        # 2. 全局特征 (使用类常量GLOBAL_DIM)
+        dim += self.GLOBAL_DIM  # [待分配订单数, 空闲骑手数, 忙碌骑手数, 订单/骑手比, 平均超时风险, 平均商家利用率, 平均等餐时间]
         
-        # 3. 订单特征 (max_pending_orders * 9)
+        # 3. 订单特征 (使用类常量ORDER_FEATURE_DIM)
         # 每个订单: [x坐标, y坐标, 剩余时间窗归一化, 准备完成时间, 距离最近骑手距离归一化]
         # Day 22新增: [商家队列位置, 商家利用率, 预估出餐时间, 餐品是否就绪]
-        dim += self.max_pending_orders * 9
+        dim += self.max_pending_orders * self.ORDER_FEATURE_DIM
         
-        # 4. 骑手特征 (max_couriers * 4)
+        # 4. 骑手特征 (使用类常量COURIER_FEATURE_DIM)
         # 每个骑手: [x坐标, y坐标, 当前负载/最大容量, 空闲时长归一化]
-        dim += self.max_couriers * 4
+        dim += self.max_couriers * self.COURIER_FEATURE_DIM
         
         # 5. 空间热力图 (grid_size * grid_size)
         # 网格化订单密度

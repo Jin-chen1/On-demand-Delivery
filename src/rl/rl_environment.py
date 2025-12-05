@@ -596,10 +596,14 @@ class DeliveryRLEnvironment(gym.Env):
         """
         获取discrete模式的动作掩码
         
+        检查条件：
+        1. 骑手有空余容量 (assigned < capacity)
+        2. 骑手处于可接单状态 (is_available)
+        
         Returns:
             shape=(max_couriers+1,) 的布尔数组
             mask[0] = True (延迟动作始终有效)
-            mask[i] = True 如果骑手i有空余容量
+            mask[i] = True 如果骑手i可以接单
         """
         mask = np.zeros(self.max_couriers + 1, dtype=bool)
         
@@ -609,10 +613,17 @@ class DeliveryRLEnvironment(gym.Env):
         if not self.sim_env:
             return mask
         
-        # 检查每个骑手是否有空余容量
+        # 检查每个骑手是否可以接单
         for courier_id, courier in self.sim_env.couriers.items():
             if courier_id <= self.max_couriers:
-                if len(courier.assigned_orders) < courier.max_capacity:
+                # 检查容量
+                has_capacity = len(courier.assigned_orders) < courier.max_capacity
+                # 检查是否可用（如果有is_available方法）
+                is_available = courier.is_available() if hasattr(courier, 'is_available') else True
+                # 检查是否可以接受新订单（如果有can_accept_new_order方法）
+                can_accept = courier.can_accept_new_order() if hasattr(courier, 'can_accept_new_order') else has_capacity
+                
+                if can_accept:
                     mask[courier_id] = True
         
         return mask
@@ -620,6 +631,11 @@ class DeliveryRLEnvironment(gym.Env):
     def _get_multi_discrete_action_mask(self) -> np.ndarray:
         """
         获取multi_discrete模式的动作掩码
+        
+        检查条件：
+        1. 骑手有空余容量 (assigned < capacity)
+        2. 骑手处于可接单状态 (can_accept_new_order)
+        3. 订单槽位有对应的待分配订单
         
         Returns:
             shape=(max_pending_orders, max_couriers+1) 的布尔数组
@@ -636,24 +652,29 @@ class DeliveryRLEnvironment(gym.Env):
         # 获取当前待分配订单数
         num_pending = len(self.sim_env.pending_orders)
         
-        # 计算每个骑手的剩余容量
-        courier_remaining_capacity = {}
+        # 计算每个骑手的可接单状态和剩余容量
+        courier_can_accept = {}
         for courier_id, courier in self.sim_env.couriers.items():
             if courier_id <= self.max_couriers:
-                remaining = courier.max_capacity - len(courier.assigned_orders)
-                courier_remaining_capacity[courier_id] = remaining
+                # 使用can_accept_new_order方法（如果存在）
+                if hasattr(courier, 'can_accept_new_order'):
+                    can_accept = courier.can_accept_new_order()
+                else:
+                    # 回退：检查容量
+                    can_accept = len(courier.assigned_orders) < courier.max_capacity
+                courier_can_accept[courier_id] = can_accept
         
         # 为每个订单槽位设置掩码
         # 注意：需要考虑前面订单分配后对容量的影响
-        # 这里使用保守估计：假设每个订单都可能分配给任何有容量的骑手
+        # 这里使用保守估计：假设每个订单都可能分配给任何可接单的骑手
         for order_idx in range(self.max_pending_orders):
             if order_idx >= num_pending:
                 # 没有订单的槽位，只有延迟动作有效
                 continue
             
             # 检查每个骑手是否可用
-            for courier_id, remaining in courier_remaining_capacity.items():
-                if remaining > 0:
+            for courier_id, can_accept in courier_can_accept.items():
+                if can_accept:
                     mask[order_idx, courier_id] = True
         
         return mask

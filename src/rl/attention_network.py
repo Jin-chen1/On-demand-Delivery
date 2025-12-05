@@ -443,17 +443,22 @@ class AttentionFeaturesExtractor(BaseFeaturesExtractor if SB3_AVAILABLE else nn.
         解析扁平化的观测向量，提取各部分特征
         
         观测向量结构（与StateEncoder一致）：
-        - 时间特征: 3维
-        - 全局特征: 7维
-        - 订单特征: max_orders * 9维
-        - 骑手特征: max_couriers * 4维
+        - 时间特征: TIME_DIM维
+        - 全局特征: GLOBAL_DIM维
+        - 订单特征: max_orders * ORDER_FEATURE_DIM维
+        - 骑手特征: max_couriers * COURIER_FEATURE_DIM维
         - 热力图: grid_size * grid_size * 2维
+        
+        注意：维度常量从StateEncoder导入，确保同步
         """
+        # 导入StateEncoder的维度常量，确保与编码器同步
+        from .state_representation import StateEncoder
+        
         batch_size = observations.shape[0]
         
-        # 计算各部分的起始索引
-        time_dim = 3
-        global_dim = 7
+        # 使用StateEncoder的类常量，避免硬编码
+        time_dim = StateEncoder.TIME_DIM
+        global_dim = StateEncoder.GLOBAL_DIM
         order_dim = self.max_orders * self.order_feature_dim
         courier_dim = self.max_couriers * self.courier_feature_dim
         
@@ -563,6 +568,8 @@ def create_attention_policy_kwargs(
     
     用于传递给PPO/MaskablePPO的policy_kwargs参数
     
+    注意：特征维度从StateEncoder的类常量获取，确保同步
+    
     Args:
         max_orders: 最大订单数
         max_couriers: 最大骑手数
@@ -579,12 +586,19 @@ def create_attention_policy_kwargs(
         >>> policy_kwargs = create_attention_policy_kwargs()
         >>> model = PPO("MlpPolicy", env, policy_kwargs=policy_kwargs)
     """
+    # 导入StateEncoder的维度常量
+    from .state_representation import StateEncoder
+    
     return {
         'features_extractor_class': AttentionFeaturesExtractor,
         'features_extractor_kwargs': {
             'features_dim': features_dim,
             'max_orders': max_orders,
             'max_couriers': max_couriers,
+            # 使用StateEncoder的类常量，确保维度同步
+            'order_feature_dim': StateEncoder.ORDER_FEATURE_DIM,
+            'courier_feature_dim': StateEncoder.COURIER_FEATURE_DIM,
+            'global_feature_dim': StateEncoder.TIME_DIM + StateEncoder.GLOBAL_DIM,
             'd_model': d_model,
             'num_heads': num_heads,
             'num_layers': num_layers,
