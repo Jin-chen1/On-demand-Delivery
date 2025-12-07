@@ -212,7 +212,8 @@ def test_rl_dispatcher(model_path: str = None):
     # 这确保状态编码维度与模型期望的维度匹配
     rl_config = {
         'max_pending_orders': 50,
-        'max_couriers': 50  # 必须与训练配置一致
+        'max_couriers': 50,  # 必须与训练配置一致
+        'use_action_masking': True  # 启用动作屏蔽，这对MaskablePPO模型是必须的
     }
     
     rl_dispatcher = RLDispatcher(env, model_path=str(rl_model_path), config=rl_config)

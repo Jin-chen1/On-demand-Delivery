@@ -77,6 +77,13 @@ class RobustnessExperiment:
         self.weather_configs = self.config.get('weather_scenarios', {})
         self.stress_configs = self.config.get('stress_test_scenarios', {})
         
+        # 自动查找最新的RL模型
+        self.rl_model_path = self._find_latest_rl_model()
+        if self.rl_model_path:
+            logger.info(f"找到RL模型: {self.rl_model_path}")
+        else:
+            logger.warning("未找到可用的RL模型，Hybrid-HRL将回退到Greedy")
+        
         logger.info(f"加载鲁棒性场景配置，共{len(self.robustness_configs)}个场景")
         
         # 加载上海路网数据
@@ -689,6 +696,56 @@ class RobustnessExperiment:
         return results_file
 
 
+def merge_stress_test_results(output_dir: Path, current_df: pd.DataFrame = None) -> pd.DataFrame:
+    """
+    合并所有历史压力测试结果
+    
+    Args:
+        output_dir: 结果输出目录
+        current_df: 当前运行的结果（可选）
+        
+    Returns:
+        合并后的DataFrame
+    """
+    all_results = []
+    
+    # 读取所有历史结果文件
+    result_files = list(output_dir.glob("robustness_results_*.json"))
+    logger.info(f"找到 {len(result_files)} 个历史结果文件")
+    
+    for result_file in result_files:
+        try:
+            with open(result_file, 'r', encoding='utf-8') as f:
+                data = json.load(f)
+            
+            if 'stress_test_curve' in data:
+                for record in data['stress_test_curve']:
+                    all_results.append(record)
+        except Exception as e:
+            logger.warning(f"读取 {result_file} 失败: {e}")
+    
+    # 添加当前结果
+    if current_df is not None:
+        for _, row in current_df.iterrows():
+            all_results.append(row.to_dict())
+    
+    if not all_results:
+        return None
+    
+    # 创建DataFrame并去重（保留最新的结果）
+    df = pd.DataFrame(all_results)
+    
+    # 按 (Load, Algorithm) 去重，保留最后一个（最新的）
+    df = df.drop_duplicates(subset=['Load', 'Algorithm'], keep='last')
+    
+    # 按 Load 排序
+    df = df.sort_values('Load')
+    
+    logger.info(f"合并后共 {len(df)} 条记录，算法: {df['Algorithm'].unique().tolist()}")
+    
+    return df
+
+
 def main():
     """主函数"""
     parser = argparse.ArgumentParser(description='运行鲁棒性实验')
@@ -704,16 +761,39 @@ def main():
                        help='生成鲁棒性分析箱线图（正常vs暴雨）')
     parser.add_argument('--episodes', type=int, default=3,
                        help='每个场景的episode数')
+    parser.add_argument('--algorithms', type=str, nargs='+', default=None,
+                       choices=['OR-Tools', 'ALNS', 'Hybrid-HRL'],
+                       help='指定要测试的算法（可多选），例如: --algorithms ALNS Hybrid-HRL')
+    parser.add_argument('--merge-results', action='store_true',
+                       help='合并历史结果并绘制曲线（不运行新实验）')
     
     args = parser.parse_args()
     
     # 创建实验对象
     experiment = RobustnessExperiment(args.config)
     
+    # 合并历史结果模式
+    if args.merge_results:
+        df = merge_stress_test_results(experiment.output_dir)
+        if df is not None and not df.empty:
+            experiment.results['stress_test_curve'] = df.to_dict('records')
+            experiment.plot_stress_test_curve(df)
+            print("\n合并后的压力测试结果:")
+            print(df.to_string(index=False))
+        else:
+            print("没有找到可合并的结果文件")
+        return
+    
     # 运行实验
     if args.stress_test:
-        df = experiment.run_stress_test_curve(num_episodes=args.episodes)
-        experiment.plot_stress_test_curve(df)
+        df = experiment.run_stress_test_curve(algorithms=args.algorithms, num_episodes=args.episodes)
+        # 尝试合并历史结果
+        merged_df = merge_stress_test_results(experiment.output_dir, current_df=df)
+        if merged_df is not None and len(merged_df) > len(df):
+            print(f"\n已合并历史结果，共 {len(merged_df)} 条记录")
+            experiment.plot_stress_test_curve(merged_df)
+        else:
+            experiment.plot_stress_test_curve(df)
         print("\n压力测试结果:")
         print(df.to_string(index=False))
     
@@ -733,8 +813,12 @@ def main():
     
     # 如果没有指定任何实验，运行所有鲁棒性场景
     if not (args.stress_test or args.weather_test or args.boxplot or args.scenarios):
-        experiment.run_stress_test_curve(num_episodes=args.episodes)
-        experiment.plot_stress_test_curve()
+        df = experiment.run_stress_test_curve(algorithms=args.algorithms, num_episodes=args.episodes)
+        merged_df = merge_stress_test_results(experiment.output_dir, current_df=df)
+        if merged_df is not None and len(merged_df) > len(df):
+            experiment.plot_stress_test_curve(merged_df)
+        else:
+            experiment.plot_stress_test_curve(df)
     
     # 保存结果
     experiment.save_results()

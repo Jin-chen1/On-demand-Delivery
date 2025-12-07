@@ -12,7 +12,7 @@ import numpy as np
 # 仅支持alns>=7.x
 from alns import ALNS, State
 from alns.accept import SimulatedAnnealing
-from alns.stop import MaxIterations
+from alns.stop import MaxIterations, MaxRuntime
 from alns.select import RouletteWheel
 
 # 【修复】将实体类导入移到文件顶部，避免函数内重复导入
@@ -95,11 +95,34 @@ class VRPSolution(State):
             courier = self.env.couriers[courier_id]
             current_pos = courier.current_node
             
-            # 【修复3】考虑骑手当前任务剩余时间
-            # 如果骑手正在移动，需要加上剩余移动时间
+            # 【修复3+5】考虑骑手当前任务剩余时间
+            # 如果骑手正在执行任务（非IDLE），估算其忙碌结束时间
             simulated_time = current_time
-            if hasattr(courier, 'busy_until') and courier.busy_until > current_time:
-                simulated_time = courier.busy_until
+            if courier.status != CourierStatus.IDLE and courier.current_route:
+                # 估算当前任务的剩余时间
+                first_task = courier.current_route[0]
+                task_action, task_order_id, task_node = first_task
+                try:
+                    # 计算到当前任务目标节点的行程时间
+                    remaining_travel = self.env.get_travel_time(
+                        current_pos, task_node, courier.speed_kph
+                    )
+                    # 尝试获取订单定义的真实服务时长
+                    task_order = self.env.orders.get(task_order_id)
+                    if task_order:
+                        if task_action == 'pickup':
+                            # 使用订单定义的取货时长，默认120s
+                            service_time = getattr(task_order, 'pickup_duration', 120.0)
+                        else:
+                            # 使用订单定义的送货时长，默认120s
+                            service_time = getattr(task_order, 'dropoff_duration', 120.0)
+                    else:
+                        # 兜底默认值
+                        service_time = 120.0
+                    simulated_time = current_time + remaining_travel + service_time
+                except Exception:
+                    # 如果计算失败，使用保守估计
+                    simulated_time = current_time + 120.0  # 假设2分钟
             
             for action, order_id, target_node in route:
                 try:
@@ -197,6 +220,7 @@ class ALNSDispatcher:
         
         # ALNS参数
         self.iterations = self.config.get('iterations', 200)
+        self.max_runtime = self.config.get('max_runtime', 10.0)  # 最大求解时间（秒）
         self.destroy_degree_min = self.config.get('destroy_degree_min', 0.1)
         self.destroy_degree_max = self.config.get('destroy_degree_max', 0.4)
         self.temperature_start = self.config.get('temperature_start', 10000.0)
@@ -216,7 +240,7 @@ class ALNSDispatcher:
         self.total_solve_time = 0.0
         
         logger.info("ALNS调度器初始化完成")
-        logger.info(f"  迭代次数: {self.iterations}")
+        logger.info(f"  迭代次数: {self.iterations}, 最大求解时间: {self.max_runtime}秒")
         logger.info(f"  破坏程度: {self.destroy_degree_min:.0%} - {self.destroy_degree_max:.0%}")
         logger.info(f"  温度范围: {self.temperature_start:.0f} -> {self.temperature_end:.1f}")
     
@@ -260,8 +284,9 @@ class ALNSDispatcher:
                 step=self.temperature_decay
             )
             
-            # 停止准则：最大迭代次数
-            stop = MaxIterations(self.iterations)
+            # 停止准则：最大迭代次数 OR 最大运行时间（先到者为准）
+            # 使用MaxRuntime作为主要限制，防止单次优化耗时过长
+            stop = MaxRuntime(self.max_runtime)
             
             # 算子选择：轮盘赌
             op_select = RouletteWheel(
@@ -896,6 +921,13 @@ class ALNSDispatcher:
             
             # 2. 【问题1核心修复】将ASSIGNED订单分配给新骑手
             if order.status == OrderStatus.ASSIGNED:
+                # 【Bug1修复】检查新骑手容量
+                if not new_courier.can_accept_new_order():
+                    logger.warning(
+                        f"骑手{new_courier_id}已满载，跳过订单{order_id}重分配"
+                    )
+                    continue
+                
                 # 更新订单归属信息
                 order.assigned_courier_id = new_courier_id
                 
@@ -987,8 +1019,13 @@ class ALNSDispatcher:
                     )
                 # 验证当前任务是否仍然有效
                 elif task_order is not None:
-                    if task_action == 'pickup' and task_order.status in [OrderStatus.PENDING, OrderStatus.ASSIGNED]:
+                    if task_action == 'pickup' and task_order.status == OrderStatus.ASSIGNED:
+                        # 【Bug4修复】只有ASSIGNED状态才能保留pickup任务
+                        # PENDING状态不能保留，因为start_pickup要求ASSIGNED状态
                         current_task = task
+                    elif task_action == 'pickup' and task_order.status == OrderStatus.PENDING:
+                        # PENDING状态的订单不能作为当前任务
+                        logger.warning(f"当前pickup任务订单{task_order_id}状态为PENDING，跳过")
                     elif task_action == 'pickup' and task_order.status == OrderStatus.PICKED_UP:
                         # 【关键修复】pickup刚完成，订单变为PICKED_UP
                         # 需要将delivery任务作为当前任务，而不是丢弃
@@ -1016,11 +1053,12 @@ class ALNSDispatcher:
                 if order is None:
                     continue
                 
-                # pickup任务：只有PENDING或ASSIGNED状态才能取货
+                # pickup任务：只有ASSIGNED状态才能取货
+                # 【Bug2修复】不允许PENDING状态进入路线，因为start_pickup要求ASSIGNED状态
                 # 注意：PICKING_UP表示正在被另一个骑手取货，不能重复
                 if action == 'pickup':
-                    if order.status not in [OrderStatus.PENDING, OrderStatus.ASSIGNED]:
-                        logger.debug(f"跳过pickup任务：订单{order_id}状态为{order.status}")
+                    if order.status != OrderStatus.ASSIGNED:
+                        logger.debug(f"跳过pickup任务：订单{order_id}状态为{order.status}，需要ASSIGNED")
                         continue
                 # delivery任务：ASSIGNED或PICKED_UP状态才能添加
                 # ASSIGNED：pickup还没完成，delivery在路线中等待执行
@@ -1067,6 +1105,19 @@ class ALNSDispatcher:
                 # 回退订单状态为PENDING
                 order.status = OrderStatus.PENDING
                 order.assigned_courier_id = None
+                
+                # 【Bug3修复】从所有骑手路线中移除该订单的任务
+                # 防止骑手执行路线时尝试取货PENDING状态的订单
+                for cid, c in self.env.couriers.items():
+                    original_len = len(c.current_route)
+                    c.current_route = [
+                        task for task in c.current_route
+                        if task[1] != order_id
+                    ]
+                    if len(c.current_route) < original_len:
+                        logger.debug(
+                            f"从骑手{cid}路线中移除订单{order_id}的任务"
+                        )
                 
                 # 【问题2修复】确保它在pending_orders中，以便下轮调度
                 # 注意：pending_orders是List类型，使用append而非add

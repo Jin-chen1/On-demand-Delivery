@@ -78,6 +78,23 @@ def calculate_full_distance_matrix(G):
             print(f"  Warning: Error at node {source}: {e}")
             continue
     
+    # ================== 【关键修复】替换无穷大值 ==================
+    # 问题：如果路网不连通（有孤立节点），两点间距离会保持 np.inf
+    # 后果：OR-Tools 尝试将 inf 转为整数时会导致 OverflowError 或 C++ 层崩溃
+    # 解决：将 inf 替换为一个非常大的有限数字（惩罚值）
+    print("\n  Post-processing: Replacing infinite distances with penalty...")
+    inf_count = np.isinf(distance_matrix).sum()
+    if inf_count > 0:
+        print(f"  Found {inf_count} unreachable pairs! Replacing with 1,000,000m.")
+        # 将无穷大替换为 1,000,000m (1000km)，作为不可达的高额惩罚
+        distance_matrix[np.isinf(distance_matrix)] = 1000000.0
+        # 时间也做相应替换：假设极慢速度，设为24小时
+        time_matrix[np.isinf(time_matrix)] = 24 * 3600.0  # 86400秒
+        print(f"  Replaced {inf_count} infinite values with penalty values.")
+    else:
+        print(f"  No infinite values found. Road network is fully connected.")
+    # =============================================================
+    
     return distance_matrix, time_matrix, node_to_idx, idx_to_node, nodes
 
 
