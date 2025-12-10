@@ -357,6 +357,7 @@ class EpisodeMetricsCallback(BaseCallback):
                  eval_env: Any = None,
                  eval_freq: int = 5000,
                  n_eval_episodes: int = 5,
+                 use_action_masking: bool = False,
                  verbose: int = 1):
         """
         初始化Episode指标回调
@@ -365,12 +366,14 @@ class EpisodeMetricsCallback(BaseCallback):
             eval_env: 评估环境
             eval_freq: 评估频率
             n_eval_episodes: 每次评估的Episode数
+            use_action_masking: 是否使用动作掩码（MaskablePPO需要）
             verbose: 详细程度
         """
         super().__init__(verbose)
         self.eval_env = eval_env
         self.eval_freq = eval_freq
         self.n_eval_episodes = n_eval_episodes
+        self.use_action_masking = use_action_masking
         
         # 评估历史
         self.eval_history = {
@@ -401,7 +404,12 @@ class EpisodeMetricsCallback(BaseCallback):
             episode_reward = 0
             
             while not done:
-                action, _ = self.model.predict(obs, deterministic=True)
+                # MaskablePPO需要显式传入action_masks，否则会使用错误的掩码
+                if self.use_action_masking and hasattr(self.eval_env, 'action_masks'):
+                    action_masks = self.eval_env.action_masks()
+                    action, _ = self.model.predict(obs, deterministic=True, action_masks=action_masks)
+                else:
+                    action, _ = self.model.predict(obs, deterministic=True)
                 obs, reward, terminated, truncated, info = self.eval_env.step(action)
                 episode_reward += reward
                 done = terminated or truncated
@@ -454,6 +462,7 @@ class CurriculumAdvanceCallback(BaseCallback):
                  eval_freq: int = 5000,
                  n_eval_episodes: int = 3,
                  min_timesteps: int = 10000,
+                 use_action_masking: bool = False,
                  verbose: int = 1):
         """
         初始化课程达标跳转回调
@@ -465,6 +474,7 @@ class CurriculumAdvanceCallback(BaseCallback):
             eval_freq: 评估频率（步数）
             n_eval_episodes: 每次评估的Episode数
             min_timesteps: 最少训练步数（防止过早跳转）
+            use_action_masking: 是否使用动作掩码（MaskablePPO需要）
             verbose: 详细程度
         """
         super().__init__(verbose)
@@ -474,6 +484,7 @@ class CurriculumAdvanceCallback(BaseCallback):
         self.eval_freq = eval_freq
         self.n_eval_episodes = n_eval_episodes
         self.min_timesteps = min_timesteps
+        self.use_action_masking = use_action_masking
         
         # 达标状态
         self.stage_completed = False
@@ -508,7 +519,12 @@ class CurriculumAdvanceCallback(BaseCallback):
             done = False
             
             while not done:
-                action, _ = self.model.predict(obs, deterministic=True)
+                # MaskablePPO需要显式传入action_masks，否则会使用错误的掩码
+                if self.use_action_masking and hasattr(self.eval_env, 'action_masks'):
+                    action_masks = self.eval_env.action_masks()
+                    action, _ = self.model.predict(obs, deterministic=True, action_masks=action_masks)
+                else:
+                    action, _ = self.model.predict(obs, deterministic=True)
                 obs, reward, terminated, truncated, info = self.eval_env.step(action)
                 done = terminated or truncated
             
@@ -866,14 +882,17 @@ class RLTrainer:
             try:
                 from .attention_network import create_attention_policy_kwargs
                 attention_config = policy_config.get('attention', {})
+                state_encoder_config = self.rl_config.get('state_encoder', {})
                 policy_kwargs = create_attention_policy_kwargs(
-                    max_orders=self.rl_config.get('state_encoder', {}).get('max_pending_orders', 50),
-                    max_couriers=self.rl_config.get('state_encoder', {}).get('max_couriers', 50),
+                    max_orders=state_encoder_config.get('max_pending_orders', 50),
+                    max_couriers=state_encoder_config.get('max_couriers', 50),
+                    grid_size=state_encoder_config.get('grid_size', 10),
                     d_model=attention_config.get('d_model', 64),
                     num_heads=attention_config.get('num_heads', 4),
                     num_layers=attention_config.get('num_layers', 2),
                     features_dim=attention_config.get('features_dim', 128),
-                    dropout=attention_config.get('dropout', 0.1)
+                    dropout=attention_config.get('dropout', 0.1),
+                    net_arch=policy_config.get('net_arch', [256, 256])  # 从配置读取，不再硬编码
                 )
                 logger.info("  使用Attention网络架构")
             except ImportError as e:
@@ -1119,6 +1138,9 @@ class RLTrainer:
             eval_freq = curriculum_config.get('eval_freq', 5000)
             n_eval_episodes = curriculum_config.get('n_eval_episodes', 5)  # 默认5，减少波动
             
+            # 检查是否使用动作掩码（MaskablePPO需要在predict时传入action_masks）
+            use_action_masking = self.rl_config.get('use_action_masking', False) and MASKABLE_PPO_AVAILABLE
+            
             curriculum_callback = CurriculumAdvanceCallback(
                 eval_env=eval_env,
                 min_completion_rate=stage.get('min_completion_rate', 0.5),
@@ -1126,6 +1148,7 @@ class RLTrainer:
                 eval_freq=eval_freq,
                 n_eval_episodes=n_eval_episodes,
                 min_timesteps=10000,  # 至少训练1万步才检测
+                use_action_masking=use_action_masking,
                 verbose=1
             )
             callbacks.append(curriculum_callback)

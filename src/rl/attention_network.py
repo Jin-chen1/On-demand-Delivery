@@ -357,6 +357,7 @@ class AttentionFeaturesExtractor(BaseFeaturesExtractor if SB3_AVAILABLE else nn.
                  order_feature_dim: int = 9,
                  courier_feature_dim: int = 4,
                  global_feature_dim: int = 10,
+                 grid_size: int = 10,
                  d_model: int = 64,
                  num_heads: int = 4,
                  num_layers: int = 2,
@@ -370,6 +371,7 @@ class AttentionFeaturesExtractor(BaseFeaturesExtractor if SB3_AVAILABLE else nn.
             order_feature_dim: 每个订单的特征维度
             courier_feature_dim: 每个骑手的特征维度
             global_feature_dim: 全局特征维度
+            grid_size: 热力图网格大小（用于订单密度和商家繁忙度热力图）
             d_model: Transformer隐藏维度
             num_heads: 注意力头数
             num_layers: Transformer层数
@@ -386,7 +388,11 @@ class AttentionFeaturesExtractor(BaseFeaturesExtractor if SB3_AVAILABLE else nn.
         self.order_feature_dim = order_feature_dim
         self.courier_feature_dim = courier_feature_dim
         self.global_feature_dim = global_feature_dim
+        self.grid_size = grid_size
         self.d_model = d_model
+        
+        # 热力图维度：订单密度热力图 + 商家繁忙度热力图
+        self.heatmap_dim = grid_size * grid_size * 2
         
         # 订单编码器
         self.order_encoder = OrderEncoder(
@@ -409,9 +415,17 @@ class AttentionFeaturesExtractor(BaseFeaturesExtractor if SB3_AVAILABLE else nn.
         # 交叉注意力
         self.cross_attention = CrossAttentionLayer(d_model, num_heads, dropout)
         
-        # 全局特征编码器
+        # 全局特征编码器（包含时间+全局统计特征）
         self.global_encoder = nn.Sequential(
             nn.Linear(global_feature_dim, d_model),
+            nn.ReLU(),
+            nn.Linear(d_model, d_model)
+        )
+        
+        # 热力图编码器（将扁平化的热力图编码为d_model维度）
+        # 使用简单的MLP处理，未来可扩展为CNN
+        self.heatmap_encoder = nn.Sequential(
+            nn.Linear(self.heatmap_dim, d_model),
             nn.ReLU(),
             nn.Linear(d_model, d_model)
         )
@@ -427,15 +441,16 @@ class AttentionFeaturesExtractor(BaseFeaturesExtractor if SB3_AVAILABLE else nn.
             nn.ReLU()
         )
         
-        # 最终融合层
+        # 最终融合层（增加热力图特征：d_model * 4）
         self.fusion = nn.Sequential(
-            nn.Linear(d_model * 3, features_dim),
+            nn.Linear(d_model * 4, features_dim),
             nn.ReLU(),
             nn.Linear(features_dim, features_dim)
         )
         
         logger.info(f"AttentionFeaturesExtractor初始化完成")
         logger.info(f"  d_model: {d_model}, num_heads: {num_heads}, num_layers: {num_layers}")
+        logger.info(f"  热力图网格: {grid_size}x{grid_size}, 热力图维度: {self.heatmap_dim}")
         logger.info(f"  输出特征维度: {features_dim}")
     
     def _parse_observation(self, observations: torch.Tensor) -> Dict[str, torch.Tensor]:
@@ -482,8 +497,10 @@ class AttentionFeaturesExtractor(BaseFeaturesExtractor if SB3_AVAILABLE else nn.
         courier_features = courier_features.view(batch_size, self.max_couriers, self.courier_feature_dim)
         idx += courier_dim
         
-        # 热力图（暂时不使用，可以后续添加CNN处理）
-        # heatmap_features = observations[:, idx:]
+        # 热力图特征（订单密度热力图 + 商家繁忙度热力图）
+        # 维度: grid_size * grid_size * 2
+        heatmap_features = observations[:, idx:idx + self.heatmap_dim]
+        idx += self.heatmap_dim
         
         # 合并时间和全局特征
         combined_global = torch.cat([time_features, global_features], dim=-1)
@@ -497,6 +514,7 @@ class AttentionFeaturesExtractor(BaseFeaturesExtractor if SB3_AVAILABLE else nn.
             'global_features': combined_global,
             'order_features': order_features,
             'courier_features': courier_features,
+            'heatmap_features': heatmap_features,
             'order_mask': order_mask,
             'courier_mask': courier_mask
         }
@@ -547,8 +565,11 @@ class AttentionFeaturesExtractor(BaseFeaturesExtractor if SB3_AVAILABLE else nn.
         courier_count = courier_mask.sum(dim=1).clamp(min=1)
         courier_pooled = courier_sum / courier_count  # (batch, d_model)
         
-        # 融合所有特征
-        combined = torch.cat([global_repr, order_pooled, courier_pooled], dim=-1)
+        # 编码热力图特征（订单密度 + 商家繁忙度）
+        heatmap_repr = self.heatmap_encoder(parsed['heatmap_features'])  # (batch, d_model)
+        
+        # 融合所有特征（全局 + 订单 + 骑手 + 热力图）
+        combined = torch.cat([global_repr, order_pooled, courier_pooled, heatmap_repr], dim=-1)
         features = self.fusion(combined)  # (batch, features_dim)
         
         return features
@@ -557,11 +578,13 @@ class AttentionFeaturesExtractor(BaseFeaturesExtractor if SB3_AVAILABLE else nn.
 def create_attention_policy_kwargs(
     max_orders: int = 50,
     max_couriers: int = 50,
+    grid_size: int = 10,
     d_model: int = 64,
     num_heads: int = 4,
     num_layers: int = 2,
     features_dim: int = 128,
-    dropout: float = 0.1
+    dropout: float = 0.1,
+    net_arch: Optional[List[int]] = None
 ) -> Dict[str, Any]:
     """
     创建使用Attention特征提取器的policy_kwargs
@@ -573,21 +596,28 @@ def create_attention_policy_kwargs(
     Args:
         max_orders: 最大订单数
         max_couriers: 最大骑手数
+        grid_size: 热力图网格大小（默认10，与StateEncoder一致）
         d_model: Transformer隐藏维度
         num_heads: 注意力头数
         num_layers: Transformer层数
         features_dim: 输出特征维度
         dropout: Dropout率
+        net_arch: 策略/价值网络隐藏层配置（从rl_config.yaml读取）
+                  如果为None，使用默认值[128, 64]
     
     Returns:
         policy_kwargs字典
     
     Example:
-        >>> policy_kwargs = create_attention_policy_kwargs()
+        >>> policy_kwargs = create_attention_policy_kwargs(net_arch=[256, 256])
         >>> model = PPO("MlpPolicy", env, policy_kwargs=policy_kwargs)
     """
     # 导入StateEncoder的维度常量
     from .state_representation import StateEncoder
+    
+    # 使用传入的net_arch或默认值
+    if net_arch is None:
+        net_arch = [128, 64]
     
     return {
         'features_extractor_class': AttentionFeaturesExtractor,
@@ -599,12 +629,13 @@ def create_attention_policy_kwargs(
             'order_feature_dim': StateEncoder.ORDER_FEATURE_DIM,
             'courier_feature_dim': StateEncoder.COURIER_FEATURE_DIM,
             'global_feature_dim': StateEncoder.TIME_DIM + StateEncoder.GLOBAL_DIM,
+            'grid_size': grid_size,
             'd_model': d_model,
             'num_heads': num_heads,
             'num_layers': num_layers,
             'dropout': dropout
         },
-        'net_arch': dict(pi=[128, 64], vf=[128, 64])  # 策略网络和价值网络的隐藏层
+        'net_arch': dict(pi=net_arch, vf=net_arch)  # 策略网络和价值网络使用相同配置
     }
 
 
