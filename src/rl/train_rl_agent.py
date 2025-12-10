@@ -97,6 +97,21 @@ logger = logging.getLogger(__name__)
 #   - 不使用lambda或闭包捕获复杂对象
 # ============================================================
 
+def _mask_fn(env):
+    """
+    动作掩码函数（模块级，用于ActionMasker包装器）
+    
+    MaskablePPO要求环境通过ActionMasker包装器提供动作掩码。
+    此函数在模块顶层定义以确保可被pickle（Windows多进程兼容）。
+    
+    Args:
+        env: 被包装的环境实例
+        
+    Returns:
+        np.ndarray: 动作掩码数组，True表示动作有效
+    """
+    return env.action_masks()
+
 def _make_env_factory(sim_config: Dict[str, Any], rl_config: Dict[str, Any], 
                       log_dir: Optional[str] = None, rank: int = 0):
     """
@@ -105,6 +120,11 @@ def _make_env_factory(sim_config: Dict[str, Any], rl_config: Dict[str, Any],
     Windows兼容性：
     - 此函数必须在模块顶层定义，否则Windows的spawn模式无法pickle
     - 内部的_init函数虽然是闭包，但由于外层函数在模块顶层，整体可pickle
+    
+    ActionMasker包装说明：
+    - 当use_action_masking=True时，MaskablePPO要求环境被ActionMasker包装
+    - ActionMasker必须在Monitor之前包装（最内层），以确保action_masks()方法可被正确调用
+    - 包装顺序：DeliveryRLEnvironment -> ActionMasker -> Monitor
     
     Args:
         sim_config: 仿真配置
@@ -120,6 +140,13 @@ def _make_env_factory(sim_config: Dict[str, Any], rl_config: Dict[str, Any],
             simulation_config=sim_config,
             rl_config=rl_config
         )
+        
+        # === ActionMasker包装（MaskablePPO必需）===
+        # 当启用动作屏蔽时，必须用ActionMasker包装环境
+        # 否则MaskablePPO会报错：缺少action_masks键或Observation Space不匹配
+        if rl_config.get('use_action_masking', False) and MASKABLE_PPO_AVAILABLE:
+            env = ActionMasker(env, _mask_fn)
+        
         # 使用Monitor包装以记录episode信息
         monitor_path = f"{log_dir}/env_{rank}" if log_dir else None
         return Monitor(env, filename=monitor_path, allow_early_resets=True)
@@ -671,8 +698,12 @@ class RLTrainer:
         """
         创建RL环境
         
+        包装顺序说明：
+        - DeliveryRLEnvironment -> ActionMasker（可选）-> Monitor
+        - ActionMasker必须在Monitor之前，以确保action_masks()方法可被正确调用
+        
         Returns:
-            RL环境实例
+            RL环境实例（已包装Monitor，可选ActionMasker）
         """
         # 合并配置
         sim_config = {**self.sim_config, **kwargs}
@@ -681,6 +712,12 @@ class RLTrainer:
             simulation_config=sim_config,
             rl_config=self.rl_config
         )
+        
+        # === ActionMasker包装（MaskablePPO必需）===
+        # 当启用动作屏蔽时，必须用ActionMasker包装环境
+        # 否则MaskablePPO会报错：缺少action_masks键或Observation Space不匹配
+        if self.rl_config.get('use_action_masking', False) and MASKABLE_PPO_AVAILABLE:
+            env = ActionMasker(env, _mask_fn)
         
         # 添加Monitor包装器（关键修复：用于记录Episode统计）
         # 没有Monitor，ep_info_buffer将为空，导致无法计算平均奖励
@@ -1041,11 +1078,14 @@ class RLTrainer:
             # 更新当前环境引用（用于下一阶段关闭）
             current_env = env
             
-            # 创建评估环境（用于达标检测，不需要Monitor）
+            # 创建评估环境（用于达标检测，不需要Monitor但需要ActionMasker）
             eval_env = DeliveryRLEnvironment(
                 simulation_config=stage_sim_config,
                 rl_config=self.rl_config
             )
+            # 评估环境也需要ActionMasker包装，否则MaskablePPO.predict会报错
+            if self.rl_config.get('use_action_masking', False) and MASKABLE_PPO_AVAILABLE:
+                eval_env = ActionMasker(eval_env, _mask_fn)
             
             # 创建或更新模型
             if model is None:
@@ -1061,9 +1101,13 @@ class RLTrainer:
             callbacks = []
             
             # 1. 训练监控回调（不含早停）
+            # 为每个阶段使用独立的日志目录，避免training_history.json被覆盖
+            stage_log_dir = self.output_dir / f"stage_{stage_idx + 1}"
+            stage_log_dir.mkdir(parents=True, exist_ok=True)
+            
             monitor_callback = TrainingMonitorCallback(
                 check_freq=1000,
-                log_dir=str(self.output_dir),
+                log_dir=str(stage_log_dir),
                 early_stop_patience=9999,  # 实际上禁用早停
                 min_improvement=0.01,
                 verbose=1
