@@ -203,12 +203,6 @@ class RewardCalculator:
                               order.latest_delivery_time - current_time < 1800)
             if urgent_count > 0:
                 reward -= self.weight_urgent_delay_penalty * urgent_count
-            
-            # 如果延迟被证明有效（后续有更优骑手），给予补偿奖励
-            # Day 27: delay_justified 现在从 action 中获取（在分配时判断）
-            if action.get('delay_justified', False):
-                reward += 2.0
-                logger.debug("延迟派单被证明合理，给予+2.0补偿奖励")
         
         # 7. 成功分配订单的即时奖励（鼓励及时分配而非延迟）
         if action.get('action_type') in ['assign', 'assign_fallback']:
@@ -216,6 +210,13 @@ class RewardCalculator:
             # 如果使用回退机制分配，给予惩罚
             if action.get('action_type') == 'assign_fallback':
                 reward -= self.weight_assignment_bonus * 0.3
+            
+            # Day 27修复: delay_justified补偿奖励应在分配时给予
+            # 当订单之前被延迟过，且当前分配的骑手比延迟时的最佳骑手更优时，
+            # 说明延迟决策是正确的，给予补偿奖励
+            if action.get('delay_justified', False):
+                reward += 2.0
+                logger.debug("延迟派单被证明合理（分配时找到更优骑手），给予+2.0补偿奖励")
             
             # 方案C：紧急订单优先奖励
             # 如果分配的是紧急订单（30分钟内到期），给予额外奖励
@@ -237,6 +238,11 @@ class RewardCalculator:
                 # 回退分配惩罚
                 if assignment.get('is_fallback', False):
                     reward -= self.weight_assignment_bonus * 0.3
+                
+                # Day 27: delay_justified补偿奖励（multi_discrete模式）
+                if assignment.get('delay_justified', False):
+                    reward += 2.0
+                    logger.debug(f"订单{assignment.get('order_id')}延迟合理，给予+2.0补偿奖励")
                 
                 # 方案C：紧急订单优先奖励
                 order = assignment.get('order')

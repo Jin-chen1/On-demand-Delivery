@@ -1291,6 +1291,13 @@ class DeliveryRLEnvironment(gym.Env):
             
             if raw_action == 0:
                 # 明确延迟派单
+                # Day 27: 记录延迟时的最佳可用骑手距离，用于后续判断delay_justified
+                best_distance = self._get_best_available_courier_distance(order)
+                if order_id not in self._delay_tracking:
+                    self._delay_tracking[order_id] = {
+                        'delay_time': self.sim_env.env.now,
+                        'best_distance_at_delay': best_distance
+                    }
                 continue
             
             # 使用_try_assign_with_fallback，与discrete模式保持一致
@@ -1312,6 +1319,26 @@ class DeliveryRLEnvironment(gym.Env):
                 self.sim_env.assigned_orders.append(order_id)
             # 注意：订单状态已在插入方法内部更新，无需重复调用
             
+            # Day 27: 判断延迟是否合理（如果该订单之前被延迟过）
+            delay_justified = False
+            if order_id in self._delay_tracking:
+                tracking = self._delay_tracking[order_id]
+                # 计算当前分配的骑手到商家距离
+                courier = self.sim_env.couriers.get(assigned_courier_id)
+                if courier:
+                    current_distance = self._calculate_distance(
+                        courier.current_node, order.merchant_node
+                    )
+                    # 如果当前距离比延迟时的最佳距离更短，说明延迟是合理的
+                    if current_distance < tracking['best_distance_at_delay'] * 0.9:
+                        delay_justified = True
+                        logger.debug(
+                            f"订单{order_id}延迟合理: 延迟时最佳距离={tracking['best_distance_at_delay']:.0f}m, "
+                            f"当前距离={current_distance:.0f}m"
+                        )
+                # 清理追踪记录
+                del self._delay_tracking[order_id]
+            
             # 记录分配详情（包含order对象，用于奖励计算中的商家惩罚）
             is_fallback = assigned_courier_id != preferred_courier_id
             assignments.append({
@@ -1319,7 +1346,8 @@ class DeliveryRLEnvironment(gym.Env):
                 'order': order,  # 订单对象，用于检查商家信息
                 'courier_id': assigned_courier_id,
                 'distance_increase': distance_increase,
-                'is_fallback': is_fallback
+                'is_fallback': is_fallback,
+                'delay_justified': delay_justified  # Day 27: 延迟合理性标记
             })
             total_distance_increase += distance_increase
         
