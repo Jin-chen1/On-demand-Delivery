@@ -188,25 +188,25 @@ rl:
       # 如果某阶段num_couriers > max_couriers，训练时会抛出ValueError
       curriculum_stages:
         - name: "warmup"
-          description: "热身阶段：100单，运力充足（放宽条件让Agent学习）"
+          description: "热身阶段：100单，运力充足"
           orders_file: "data/orders/uniform_grid_100.csv"
           total_orders: 100
           num_couriers: 20
           simulation_duration: 43200  # 12小时
           timesteps: 50000
-          min_completion_rate: 0.3  # 放宽：从0.7降到0.3
-          max_timeout_rate: 0.7     # 放宽：从0.3提高到0.7
+          min_completion_rate: 0.90  # 完成率≥90%
+          max_timeout_rate: 0.10     # 超时率≤10%
           difficulty_score: 0.1
         
         - name: "transition"
-          description: "过渡阶段：300单，20骑手（从100单到500单的过渡）"
+          description: "过渡阶段：300单，20骑手"
           orders_file: "data/orders/uniform_grid_300.csv"
           total_orders: 300
           num_couriers: 20
           simulation_duration: 43200  # 12小时
           timesteps: 75000
-          min_completion_rate: 0.3
-          max_timeout_rate: 0.7
+          min_completion_rate: 0.90  # 完成率≥90%
+          max_timeout_rate: 0.10     # 超时率≤10%
           difficulty_score: 0.2
         
         - name: "low_load"
@@ -216,19 +216,19 @@ rl:
           num_couriers: 20
           simulation_duration: 43200  # 12小时
           timesteps: 100000
-          min_completion_rate: 0.35  # 调整：从0.5降到0.35
-          max_timeout_rate: 0.80     # 调整：从0.65提高到0.80（放宽超时约束）
+          min_completion_rate: 0.90  # 完成率≥90%
+          max_timeout_rate: 0.10     # 超时率≤10%
           difficulty_score: 0.3
         
         - name: "medium_load"
-          description: "中负载阶段：500单，15骑手（增加压力）"
+          description: "中负载阶段：500单，15骑手"
           orders_file: "data/orders/uniform_grid_500.csv"
           total_orders: 500
           num_couriers: 15
           simulation_duration: 43200  # 12小时
           timesteps: 150000
-          min_completion_rate: 0.35
-          max_timeout_rate: 0.80
+          min_completion_rate: 0.90  # 完成率≥90%
+          max_timeout_rate: 0.10     # 超时率≤10%
           difficulty_score: 0.5
         
         - name: "high_load"
@@ -238,19 +238,19 @@ rl:
           num_couriers: 20
           simulation_duration: 43200  # 12小时
           timesteps: 200000
-          min_completion_rate: 0.35
-          max_timeout_rate: 0.65
+          min_completion_rate: 0.90  # 完成率≥90%
+          max_timeout_rate: 0.10     # 超时率≤10%
           difficulty_score: 0.7
         
         - name: "extreme_load"
-          description: "极限阶段：1000单，15骑手（极限挑战）"
+          description: "极限阶段：1000单，15骑手"
           orders_file: "data/orders/uniform_grid_1000.csv"
           total_orders: 1000
           num_couriers: 15
           simulation_duration: 43200  # 12小时
           timesteps: 250000
-          min_completion_rate: 0.3
-          max_timeout_rate: 0.7
+          min_completion_rate: 0.90  # 完成率≥90%
+          max_timeout_rate: 0.10     # 超时率≤10%
           difficulty_score: 1.0
   
   # 评估配置 - v2优化

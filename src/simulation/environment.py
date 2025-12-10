@@ -89,6 +89,10 @@ class SimulationEnvironment:
         # 事件记录
         self.events: List[SimulationEvent] = []
         
+        # Day 27: 商家等餐事件收集（用于RL奖励计算）
+        # 每次step()调用后会清空，返回给RL环境
+        self._merchant_wait_events: List[Dict[str, Any]] = []
+        
         # 统计计数器
         self.stats = {
             'total_orders': 0,
@@ -983,11 +987,52 @@ class SimulationEnvironment:
         courier.status = CourierStatus.PICKING_UP
         order.start_pickup(self.env.now)
         
+        # Day 27: 记录骑手到达商家时间，计算等餐时间
+        courier_arrival_time = self.env.now
+        order.record_courier_arrival(courier_arrival_time)
+        
+        # 检查餐品是否已准备好
+        # 如果订单有estimated_ready_time，使用它来模拟商家备餐
+        wait_time = 0.0
+        if hasattr(order, 'estimated_ready_time') and order.estimated_ready_time is not None:
+            # 餐品准备好的时间
+            food_ready_time = order.estimated_ready_time
+            
+            if courier_arrival_time < food_ready_time:
+                # 骑手早到，需要等餐
+                wait_time = food_ready_time - courier_arrival_time
+                order.set_food_ready(food_ready_time)
+                order.calculate_waiting_time(food_ready_time)
+                
+                logger.debug(
+                    f"[{self.env.now:.1f}s] 骑手{courier.courier_id}在商家等餐 {wait_time:.1f}秒 (订单{order.order_id})"
+                )
+                
+                # 记录等餐事件，供RL奖励计算使用
+                self._merchant_wait_events.append({
+                    'order_id': order.order_id,
+                    'courier_id': courier.courier_id,
+                    'merchant_id': order.merchant_node,
+                    'wait_time': wait_time,
+                    'courier_arrival_time': courier_arrival_time,
+                    'food_ready_time': food_ready_time
+                })
+                
+                # 等待餐品准备好
+                yield self.env.timeout(wait_time)
+            else:
+                # 骑手晚到，餐已准备好
+                order.set_food_ready(food_ready_time)
+                order.calculate_waiting_time(food_ready_time)
+        
         logger.debug(f"[{self.env.now:.1f}s] 骑手{courier.courier_id}开始取货(订单{order.order_id})")
         yield self.env.timeout(order.pickup_duration)
         
         order.complete_pickup(self.env.now)
-        self.record_event('pickup_complete', order.order_id, {'courier_id': courier.courier_id})
+        self.record_event('pickup_complete', order.order_id, {
+            'courier_id': courier.courier_id,
+            'wait_time_at_merchant': wait_time
+        })
         logger.info(f"[{self.env.now:.1f}s] 骑手{courier.courier_id}完成取货(订单{order.order_id})")
     
     def _execute_delivery(self, courier, order, target_node):
@@ -1146,20 +1191,24 @@ class SimulationEnvironment:
             # 所有进程都已完成，仿真自然结束
             logger.debug(f"仿真在 {self.env.now:.1f}s 自然结束")
         
+        # Day 27: 收集本次step期间发生的等餐事件
+        # 返回后清空，避免重复计算
+        merchant_wait_events = self._merchant_wait_events.copy()
+        self._merchant_wait_events.clear()
+        
         # 返回当前状态信息
-        # TODO: 以下字段是预留接口，目前未实现：
-        # - merchant_wait_events: 商家等餐事件列表，用于RL奖励计算中的等餐惩罚
-        #   格式: [{'merchant_id': int, 'wait_time': float, 'order_id': int}, ...]
-        # - delay_justified: 延迟派单是否合理的标志，用于RL奖励计算中的延迟奖励
-        # 如需启用这些功能，需要在courier_process中记录等餐时间并在此返回
         return {
             'current_time': self.env.now,
             'pending_orders': len(self.pending_orders),
             'assigned_orders': len(self.assigned_orders),
             'completed_orders': len(self.completed_orders),
-            'timeout_orders': self.stats.get('timeout_orders', 0)
-            # 'merchant_wait_events': [],  # TODO: 实现商家等餐事件记录
-            # 'delay_justified': False,    # TODO: 实现延迟派单合理性判断
+            'timeout_orders': self.stats.get('timeout_orders', 0),
+            # Day 27: 商家等餐事件列表，用于RL奖励计算中的等餐惩罚
+            # 格式: [{'order_id': int, 'courier_id': int, 'merchant_id': int, 
+            #         'wait_time': float, 'courier_arrival_time': float, 'food_ready_time': float}, ...]
+            'merchant_wait_events': merchant_wait_events,
+            # TODO: 延迟派单合理性判断（未实现）
+            # 'delay_justified': False,
         }
     
     def _print_summary(self):

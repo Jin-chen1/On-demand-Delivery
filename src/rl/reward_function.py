@@ -205,8 +205,10 @@ class RewardCalculator:
                 reward -= self.weight_urgent_delay_penalty * urgent_count
             
             # 如果延迟被证明有效（后续有更优骑手），给予补偿奖励
-            if info.get('delay_justified', False):
+            # Day 27: delay_justified 现在从 action 中获取（在分配时判断）
+            if action.get('delay_justified', False):
                 reward += 2.0
+                logger.debug("延迟派单被证明合理，给予+2.0补偿奖励")
         
         # 7. 成功分配订单的即时奖励（鼓励及时分配而非延迟）
         if action.get('action_type') in ['assign', 'assign_fallback']:

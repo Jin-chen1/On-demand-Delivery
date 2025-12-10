@@ -193,6 +193,11 @@ class DeliveryRLEnvironment(gym.Env):
         self.episode_steps = 0
         self.episode_rewards = []
         
+        # Day 27: 延迟派单追踪（用于delay_justified奖励）
+        # 记录每个订单在延迟时的最佳可用骑手距离
+        # 格式: {order_id: {'delay_time': float, 'best_distance_at_delay': float}}
+        self._delay_tracking: Dict[int, Dict[str, float]] = {}
+        
         # 关键检查：实际骑手数不能超过max_couriers，否则动作空间无法覆盖所有骑手
         actual_couriers = len(self.sim_env.couriers) if self.sim_env else 0
         if actual_couriers > self.max_couriers:
@@ -738,11 +743,28 @@ class DeliveryRLEnvironment(gym.Env):
         
         if action == 0:
             # 延迟派单
+            # Day 27: 记录延迟时的最佳可用骑手距离，用于后续判断delay_justified
+            best_distance = self._get_best_available_courier_distance(order)
+            if order_id not in self._delay_tracking:
+                self._delay_tracking[order_id] = {
+                    'delay_time': self.sim_env.env.now,
+                    'best_distance_at_delay': best_distance,
+                    'delay_count': 1
+                }
+            else:
+                # 多次延迟，更新最佳距离（取最小值）
+                self._delay_tracking[order_id]['delay_count'] += 1
+                self._delay_tracking[order_id]['best_distance_at_delay'] = min(
+                    self._delay_tracking[order_id]['best_distance_at_delay'],
+                    best_distance
+                )
+            
             return {
                 'action_type': 'delay',
                 'order_id': order_id,
                 'assignments': [],
-                'distance_increase': 0.0
+                'distance_increase': 0.0,
+                'best_distance_at_delay': best_distance
             }
         else:
             # 分配给骑手
@@ -772,13 +794,37 @@ class DeliveryRLEnvironment(gym.Env):
             action_type = 'assign' if assigned_courier_id == courier_id else 'assign_fallback'
             logger.debug(f"订单{order_id}分配给骑手{assigned_courier_id}, 距离增加{distance_increase:.0f}m")
             
+            # Day 27: 判断延迟是否合理（如果该订单之前被延迟过）
+            delay_justified = False
+            if order_id in self._delay_tracking:
+                tracking = self._delay_tracking[order_id]
+                # 计算当前分配的骑手到商家距离
+                courier = self.sim_env.couriers[assigned_courier_id]
+                try:
+                    current_distance = self.sim_env.get_distance(
+                        courier.current_node, order.merchant_node
+                    )
+                    # 如果当前距离比延迟时的最佳距离更短，说明延迟是合理的
+                    # 使用10%的阈值，避免微小差异触发
+                    if current_distance < tracking['best_distance_at_delay'] * 0.9:
+                        delay_justified = True
+                        logger.debug(
+                            f"订单{order_id}延迟合理: 延迟时最佳距离={tracking['best_distance_at_delay']:.0f}m, "
+                            f"当前距离={current_distance:.0f}m"
+                        )
+                except Exception:
+                    pass
+                # 清理追踪记录
+                del self._delay_tracking[order_id]
+            
             return {
                 'action_type': action_type,
                 'order_id': order_id,
                 'courier_id': assigned_courier_id,
                 'original_courier_id': courier_id,
                 'assignments': [(order_id, assigned_courier_id)],
-                'distance_increase': distance_increase
+                'distance_increase': distance_increase,
+                'delay_justified': delay_justified
             }
     
     def _try_assign_with_fallback(self, order: Any, preferred_courier_id: int) -> Tuple[Optional[int], float]:
@@ -823,6 +869,34 @@ class DeliveryRLEnvironment(gym.Env):
         
         # 所有骑手都满载
         return None, 0.0
+    
+    def _get_best_available_courier_distance(self, order: Any) -> float:
+        """
+        获取当前可用骑手中到商家最近的距离
+        
+        用于延迟派单追踪，判断延迟是否合理
+        
+        Args:
+            order: 订单对象
+            
+        Returns:
+            最近可用骑手到商家的距离（米），如果没有可用骑手返回无穷大
+        """
+        best_distance = float('inf')
+        
+        for courier in self.sim_env.couriers.values():
+            # 只考虑有容量的骑手
+            if len(courier.assigned_orders) >= courier.max_capacity:
+                continue
+            
+            try:
+                dist = self.sim_env.get_distance(courier.current_node, order.merchant_node)
+                if dist < best_distance:
+                    best_distance = dist
+            except Exception:
+                continue
+        
+        return best_distance
     
     def _greedy_insert_order(self, order: Any, courier: Any) -> float:
         """
