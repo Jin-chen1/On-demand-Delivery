@@ -2,9 +2,9 @@
 __pycache__/
 *.pyc
 .pytest_cache/
-
-# IDE 配置
 .windsurf/
+.specstory/
+
 
 # 项目生成文件
 docs/
@@ -28,17 +28,22 @@ day11-13 google写代码.zip
 前10天.zip
 
 # 文档和笔记
+.cursorindexingignore
 prompt.md
 README.md
 requirements.txt
 草稿.md
 谷歌学术文献调研指南.docx
 即时配送动态路径调度的仿真+优化+强化学习研究综述.docx
+即时配送动态路径调度的仿真+优化+强化学习研究综述（格式整理）.docx
+配送课程作业.docx
+架构图.png
 文字文稿1.docx
 文字文稿2.docx
 小朱的论文.docx
 研究大纲.md
 撰写主线与笔记.docx
+修改点.docx
 
 # Word 临时文件
 ~$*.docx

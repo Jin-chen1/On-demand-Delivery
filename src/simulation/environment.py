@@ -446,52 +446,31 @@ class SimulationEnvironment:
         if not self.orders:
             return
         
-        # 获取仿真时长
         simulation_duration = self.simulation_duration
         
-        # 收集所有订单的到达时间
         arrival_times = [order.arrival_time for order in self.orders.values()]
         min_arrival = min(arrival_times)
         max_arrival = max(arrival_times)
         
-        # 检查是否需要调整
-        # 如果最早到达时间 > 仿真时长的10%，或最晚到达时间 > 仿真时长，则需要调整
-        needs_adjustment = min_arrival > simulation_duration * 0.1 or max_arrival > simulation_duration
+        eps = 1e-6
         
-        if not needs_adjustment:
-            logger.info(f"订单到达时间在仿真范围内，无需调整 (范围: {min_arrival:.0f}s - {max_arrival:.0f}s)")
-            return
+        if min_arrival < -eps:
+            raise ValueError(f"订单到达时间包含负值: min_arrival={min_arrival:.6f}s")
         
-        logger.warning(f"订单到达时间超出仿真范围! 原始范围: {min_arrival:.0f}s - {max_arrival:.0f}s, 仿真时长: {simulation_duration}s")
+        if max_arrival > simulation_duration + eps:
+            out_of_range_orders = [
+                order.order_id for order in self.orders.values()
+                if order.arrival_time > simulation_duration + eps
+            ]
+            raise ValueError(
+                "订单到达时间超出仿真时长，可能导致订单永远不会到达而被静默丢弃。"
+                f"arrival_time范围: {min_arrival:.0f}s - {max_arrival:.0f}s, "
+                f"simulation_duration={simulation_duration}s, "
+                f"out_of_range_orders(前10个)={out_of_range_orders[:10]} (总数={len(out_of_range_orders)})"
+            )
         
-        # 目标时间范围：[0, simulation_duration * 0.7]，留30%时间给配送
-        target_start = 0
-        target_end = simulation_duration * 0.7
-        
-        # 计算时间偏移和缩放
-        original_range = max_arrival - min_arrival if max_arrival > min_arrival else 1.0
-        target_range = target_end - target_start
-        scale_factor = target_range / original_range
-        
-        # 调整每个订单的时间
-        for order in self.orders.values():
-            # 线性映射到达时间
-            old_arrival = order.arrival_time
-            new_arrival = target_start + (old_arrival - min_arrival) * scale_factor
-            time_shift = new_arrival - old_arrival
-            
-            # 更新所有时间字段
-            order.arrival_time = new_arrival
-            order.earliest_pickup_time += time_shift
-            order.latest_delivery_time += time_shift
-            
-            # 更新deadline（如果存在）
-            if hasattr(order, 'deadline'):
-                order.deadline += time_shift
-        
-        # 更新到达时间统计
-        new_arrival_times = [order.arrival_time for order in self.orders.values()]
-        logger.info(f"订单到达时间已调整: {min(new_arrival_times):.0f}s - {max(new_arrival_times):.0f}s")
+        logger.info(f"订单到达时间在仿真范围内，无需调整 (范围: {min_arrival:.0f}s - {max_arrival:.0f}s)")
+        return
     
     def _initialize_merchants(self) -> None:
         """
@@ -951,8 +930,10 @@ class SimulationEnvironment:
             target_node: 目标节点ID（商家位置）
         """
         # 检查订单状态，如果已经在取货或取货完成则跳过
+        # 【Bug修复】也检查PENDING状态 - 当ALNS将订单移除并回退为PENDING时，
+        # 骑手可能已经在移动中，到达后不应该尝试取货
         from .entities import OrderStatus
-        if order.status in [OrderStatus.PICKING_UP, OrderStatus.PICKED_UP, OrderStatus.DELIVERING, OrderStatus.DELIVERED]:
+        if order.status in [OrderStatus.PENDING, OrderStatus.PICKING_UP, OrderStatus.PICKED_UP, OrderStatus.DELIVERING, OrderStatus.DELIVERED]:
             logger.warning(
                 f"[{self.env.now:.1f}s] 订单{order.order_id}状态异常(状态:{order.status})，跳过取货"
             )
@@ -978,7 +959,8 @@ class SimulationEnvironment:
             courier.add_time(travel_time)
         
         # 2. 取货 - 再次检查状态（防止移动期间状态被改变）
-        if order.status in [OrderStatus.PICKING_UP, OrderStatus.PICKED_UP, OrderStatus.DELIVERING, OrderStatus.DELIVERED]:
+        # 【Bug修复】也检查PENDING状态 - ALNS可能在骑手移动期间将订单移除
+        if order.status in [OrderStatus.PENDING, OrderStatus.PICKING_UP, OrderStatus.PICKED_UP, OrderStatus.DELIVERING, OrderStatus.DELIVERED]:
             logger.warning(
                 f"[{self.env.now:.1f}s] 订单{order.order_id}在骑手移动期间状态已改变(状态:{order.status})，跳过取货"
             )

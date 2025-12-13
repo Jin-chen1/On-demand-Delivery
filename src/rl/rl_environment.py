@@ -89,6 +89,18 @@ class DeliveryRLEnvironment(gym.Env):
         # ALNS路径优化参数
         self.alns_max_iterations = self.rl_config.get('alns_max_iterations', 10)
         
+        safety_cfg = self.rl_config.get('safety', {})
+        self.enable_safety_fallback = bool(safety_cfg.get('enable_safety_fallback', True))
+        self.fallback_pending_threshold = int(safety_cfg.get('fallback_pending_threshold', 25))
+        self.urgent_slack_threshold = float(safety_cfg.get('urgent_slack_threshold', 1800.0))
+        self.dispatch_all_when_backlog = bool(safety_cfg.get('dispatch_all_when_backlog', True))
+        
+        masking_cfg = self.rl_config.get('masking', {})
+        self.disable_delay_for_urgent = bool(masking_cfg.get('disable_delay_for_urgent', True))
+        self.enable_deadline_feasibility_mask = bool(masking_cfg.get('enable_deadline_feasibility_mask', True))
+        
+        self._last_fallback_info: Dict[str, Any] = {}
+        
         self._define_spaces()
         
         # 仿真环境实例（延迟初始化）
@@ -243,8 +255,21 @@ class DeliveryRLEnvironment(gym.Env):
         # 保存前一状态
         self._previous_state = self._current_state
         
-        # 执行动作（派单决策）
-        action_info = self._execute_action(action)
+        self._last_fallback_info = {}
+        if self.enable_safety_fallback:
+            reasons, urgent_order_ids = self._get_fallback_reasons_and_urgent_orders()
+            if reasons:
+                action_info = self._execute_safety_fallback_action(action, reasons, urgent_order_ids)
+                self._last_fallback_info = {
+                    'fallback_used': True,
+                    'fallback_reasons': reasons,
+                    'fallback_dispatched': action_info.get('fallback_dispatched', 0),
+                    'fallback_urgent_orders': urgent_order_ids
+                }
+            else:
+                action_info = self._execute_action(action)
+        else:
+            action_info = self._execute_action(action)
         
         # 推进仿真（到下一个调度时刻）
         self._advance_simulation()
@@ -274,7 +299,7 @@ class DeliveryRLEnvironment(gym.Env):
         self.episode_rewards.append(reward)
         
         # 构建info（复用step_info，避免二次调用）
-        info = {**step_info, 'action_info': action_info, 'step': self.total_steps}
+        info = {**step_info, 'action_info': action_info, 'step': self.total_steps, **(self._last_fallback_info or {})}
         
         # 如果episode结束，添加统计信息
         if terminated or truncated:
@@ -618,6 +643,15 @@ class DeliveryRLEnvironment(gym.Env):
         if not self.sim_env:
             return mask
         
+        urgent_disable_delay = False
+        if self.disable_delay_for_urgent and self.sim_env.pending_orders:
+            try:
+                order_id = self.sim_env.pending_orders[0]
+                order = self.sim_env.orders[order_id]
+                urgent_disable_delay = self._is_urgent_order(order)
+            except Exception:
+                urgent_disable_delay = False
+        
         # 检查每个骑手是否可以接单
         for courier_id, courier in self.sim_env.couriers.items():
             if courier_id <= self.max_couriers:
@@ -629,7 +663,21 @@ class DeliveryRLEnvironment(gym.Env):
                 can_accept = courier.can_accept_new_order() if hasattr(courier, 'can_accept_new_order') else has_capacity
                 
                 if can_accept:
+                    if self.enable_deadline_feasibility_mask and self.sim_env.pending_orders:
+                        try:
+                            order_id = self.sim_env.pending_orders[0]
+                            order = self.sim_env.orders[order_id]
+                            if not self._is_deadline_feasible(order, courier):
+                                continue
+                        except Exception:
+                            pass
                     mask[courier_id] = True
+        
+        if urgent_disable_delay and np.any(mask[1:]):
+            mask[0] = False
+        
+        if not np.any(mask):
+            mask[0] = True
         
         return mask
     
@@ -677,12 +725,146 @@ class DeliveryRLEnvironment(gym.Env):
                 # 没有订单的槽位，只有延迟动作有效
                 continue
             
+            order_id = self.sim_env.pending_orders[order_idx]
+            order = self.sim_env.orders[order_id]
+            has_assignable = False
+            
             # 检查每个骑手是否可用
             for courier_id, can_accept in courier_can_accept.items():
-                if can_accept:
-                    mask[order_idx, courier_id] = True
+                if not can_accept:
+                    continue
+                courier = self.sim_env.couriers.get(courier_id)
+                if courier is None:
+                    continue
+                if self.enable_deadline_feasibility_mask:
+                    try:
+                        if not self._is_deadline_feasible(order, courier):
+                            continue
+                    except Exception:
+                        continue
+                mask[order_idx, courier_id] = True
+                has_assignable = True
+            
+            if self.disable_delay_for_urgent and has_assignable and self._is_urgent_order(order):
+                mask[order_idx, 0] = False
         
         return mask
+
+    def _get_fallback_reasons_and_urgent_orders(self) -> Tuple[List[str], List[int]]:
+        if not self.sim_env:
+            return [], []
+
+        reasons: List[str] = []
+        pending_count = len(self.sim_env.pending_orders)
+        if pending_count >= self.fallback_pending_threshold:
+            reasons.append('backlog')
+
+        urgent_order_ids: List[int] = []
+        for order_id in self.sim_env.pending_orders:
+            order = self.sim_env.orders.get(order_id)
+            if order is None:
+                continue
+            if self._is_urgent_order(order):
+                urgent_order_ids.append(order_id)
+        if urgent_order_ids:
+            reasons.append('urgent')
+
+        return reasons, urgent_order_ids
+
+    def _execute_safety_fallback_action(self, raw_action: Any, reasons: List[str], urgent_order_ids: List[int]) -> Dict[str, Any]:
+        if not self.sim_env or not self.sim_env.pending_orders:
+            return {
+                'raw_action': raw_action,
+                'action_type': 'safety_fallback',
+                'assignments': [],
+                'distance_increase': 0.0,
+                'fallback_dispatched': 0
+            }
+
+        if 'backlog' in reasons and self.dispatch_all_when_backlog:
+            targets = self.sim_env.pending_orders.copy()
+        else:
+            targets = urgent_order_ids
+
+        assignments = []
+        dispatched = 0
+
+        for order_id in targets:
+            if order_id not in self.sim_env.pending_orders:
+                continue
+            order = self.sim_env.orders.get(order_id)
+            if order is None:
+                continue
+
+            preferred_courier_id = None
+            best_distance = float('inf')
+            for courier_id, courier in self.sim_env.couriers.items():
+                if courier_id > self.max_couriers:
+                    continue
+                if hasattr(courier, 'can_accept_new_order'):
+                    can_accept = courier.can_accept_new_order()
+                else:
+                    can_accept = len(courier.assigned_orders) < courier.max_capacity
+                if not can_accept:
+                    continue
+                try:
+                    dist = self.sim_env.get_distance(courier.current_node, order.merchant_node)
+                except Exception:
+                    continue
+                if dist < best_distance:
+                    best_distance = dist
+                    preferred_courier_id = courier_id
+
+            if preferred_courier_id is None:
+                continue
+
+            assigned_courier_id, _ = self._try_assign_with_fallback(order, preferred_courier_id)
+            if assigned_courier_id is None:
+                continue
+
+            self.sim_env.pending_orders.remove(order_id)
+            self.sim_env.assigned_orders.append(order_id)
+            assignments.append({'order_id': order_id, 'courier_id': assigned_courier_id})
+            dispatched += 1
+
+        return {
+            'raw_action': raw_action,
+            'action_type': 'safety_fallback',
+            'assignments': assignments,
+            'distance_increase': 0.0,
+            'fallback_dispatched': dispatched
+        }
+
+    def _is_urgent_order(self, order: Any) -> bool:
+        if not self.sim_env:
+            return False
+        now = self.sim_env.env.now if self.sim_env.env else 0.0
+        latest = getattr(order, 'latest_delivery_time', None)
+        if latest is None:
+            return False
+        try:
+            return (latest - now) <= self.urgent_slack_threshold
+        except Exception:
+            return False
+
+    def _is_deadline_feasible(self, order: Any, courier: Any) -> bool:
+        if not self.sim_env:
+            return True
+        now = self.sim_env.env.now if self.sim_env.env else 0.0
+        latest = getattr(order, 'latest_delivery_time', None)
+        if latest is None:
+            return True
+
+        try:
+            t1 = self.sim_env.get_travel_time(courier.current_node, order.merchant_node)
+            arrive_merchant = now + t1
+            earliest_pickup = getattr(order, 'earliest_pickup_time', arrive_merchant)
+            pickup_time = max(arrive_merchant, earliest_pickup)
+            t2 = self.sim_env.get_travel_time(order.merchant_node, order.customer_node)
+            arrive_customer = pickup_time + t2
+            return arrive_customer <= latest
+        except Exception:
+            return False
     
     def _execute_action(self, action: Any) -> Dict[str, Any]:
         """
@@ -1326,7 +1508,7 @@ class DeliveryRLEnvironment(gym.Env):
                 # 计算当前分配的骑手到商家距离
                 courier = self.sim_env.couriers.get(assigned_courier_id)
                 if courier:
-                    current_distance = self._calculate_distance(
+                    current_distance = self.sim_env.get_distance(
                         courier.current_node, order.merchant_node
                     )
                     # 如果当前距离比延迟时的最佳距离更短，说明延迟是合理的

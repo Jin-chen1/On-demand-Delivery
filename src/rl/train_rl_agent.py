@@ -43,6 +43,8 @@ import json
 import time
 from typing import Dict, Any, Optional, List, Callable
 
+logger = logging.getLogger(__name__)
+
 # RL训练库 - 使用统一的SB3_AVAILABLE标志
 from . import SB3_AVAILABLE
 
@@ -79,7 +81,20 @@ logging.basicConfig(
     level=logging.INFO,
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
 )
-logger = logging.getLogger(__name__)
+
+
+def _configure_training_logging(rl_config: Dict[str, Any]) -> None:
+    training_cfg = (rl_config or {}).get('training_logging', {})
+    if not training_cfg.get('reduce_simulation_logs', True):
+        return
+
+    sim_level_name = str(training_cfg.get('simulation_log_level', 'WARNING')).upper()
+    sim_level = getattr(logging, sim_level_name, logging.WARNING)
+
+    for name in [
+        'src.simulation',
+    ]:
+        logging.getLogger(name).setLevel(sim_level)
 
 
 # ============================================================
@@ -89,9 +104,9 @@ logger = logging.getLogger(__name__)
 # - Windows使用spawn模式启动子进程，要求传递给SubprocVecEnv的函数必须可pickle
 # - lambda函数通常不能被pickle，因此环境工厂函数必须在模块顶层定义
 # - 当前实现：
-#   - _make_env_factory在模块顶层，可被pickle ✅
-#   - train_with_curriculum使用DummyVecEnv（单进程），无pickle问题 ✅
-#   - CurriculumLearningCallback._update_environment使用DummyVecEnv ✅
+#   - _make_env_factory在模块顶层，可被pickle 
+#   - train_with_curriculum使用DummyVecEnv（单进程），无pickle问题 
+#   - CurriculumLearningCallback._update_environment使用DummyVecEnv 
 # - 如果未来需要使用SubprocVecEnv进行真正的多进程训练，需要确保：
 #   - 所有环境创建函数都在模块顶层
 #   - 不使用lambda或闭包捕获复杂对象
@@ -136,6 +151,7 @@ def _make_env_factory(sim_config: Dict[str, Any], rl_config: Dict[str, Any],
         环境创建函数
     """
     def _init():
+        _configure_training_logging(rl_config)
         env = DeliveryRLEnvironment(
             simulation_config=sim_config,
             rl_config=rl_config
@@ -414,8 +430,9 @@ class EpisodeMetricsCallback(BaseCallback):
                 episode_reward += reward
                 done = terminated or truncated
             
-            # 收集Episode统计
-            stats = self.eval_env.get_episode_statistics()
+            # 收集Episode统计（需要解包ActionMasker获取底层环境）
+            base_env = self.eval_env.env if hasattr(self.eval_env, 'env') else self.eval_env
+            stats = base_env.get_episode_statistics()
             completion_rates.append(stats.get('completion_rate', 0))
             timeout_rates.append(stats.get('timeout_rate', 0))
             rewards.append(episode_reward)
@@ -528,8 +545,9 @@ class CurriculumAdvanceCallback(BaseCallback):
                 obs, reward, terminated, truncated, info = self.eval_env.step(action)
                 done = terminated or truncated
             
-            # 收集统计
-            stats = self.eval_env.get_episode_statistics()
+            # 收集统计（需要解包ActionMasker获取底层环境）
+            base_env = self.eval_env.env if hasattr(self.eval_env, 'env') else self.eval_env
+            stats = base_env.get_episode_statistics()
             completion_rates.append(stats.get('completion_rate', 0))
             timeout_rates.append(stats.get('timeout_rate', 1))
         
@@ -695,6 +713,8 @@ class RLTrainer:
         logger.info(f"训练器初始化完成")
         logger.info(f"  输出目录: {self.output_dir}")
         logger.info(f"  TensorBoard日志: {self.tensorboard_dir}")
+        
+        _configure_training_logging(self.rl_config)
     
     def _load_config(self) -> dict:
         """加载配置文件"""
@@ -1165,12 +1185,13 @@ class RLTrainer:
             
             # 训练该阶段（含弹性延长机制）
             stage_start_steps = model.num_timesteps if hasattr(model, 'num_timesteps') else 0
-            max_retries = curriculum_config.get('max_retries', 2)  # 从配置读取
+            max_retries = curriculum_config.get('max_retries', 2)  # 从配置读取（-1表示无限加时）
             retry_count = 0
             extra_timesteps = curriculum_config.get('extra_timesteps', 50000)  # 从配置读取
             failure_strategy = curriculum_config.get('failure_strategy', 'stop')  # 失败策略
+            infinite_overtime = (max_retries == -1)  # 无限加时模式
             
-            while retry_count <= max_retries:
+            while True:  # 无限循环，直到达标或用户中断
                 current_timesteps = stage['timesteps'] if retry_count == 0 else extra_timesteps
                 
                 if retry_count > 0:
@@ -1187,14 +1208,21 @@ class RLTrainer:
                     # 1. 检查是否达标
                     if curriculum_callback.stage_completed:
                         logger.info(f"✅ 阶段 {stage_idx + 1} 达标完成: {curriculum_callback.completion_reason}")
-                        break # 退出重试循环，进入下一阶段
+                        break  # 退出重试循环，进入下一阶段
                     
-                    # 2. 如果未达标，检查是否值得加时
+                    # 2. 如果未达标，检查是否继续加时
                     best_rate = curriculum_callback.best_completion_rate
                     target_rate = stage.get('min_completion_rate', 0.5)
                     overtime_threshold = curriculum_config.get('overtime_threshold', 0.8)
                     threshold = target_rate * overtime_threshold  # 从配置读取容忍度
                     
+                    # 无限加时模式：只要未达标就继续加时
+                    if infinite_overtime:
+                        logger.info(f"📈 无限加时模式：当前最佳完成率 {best_rate:.1%}，目标 {target_rate:.1%}，继续训练...")
+                        retry_count += 1
+                        continue
+                    
+                    # 有限加时模式：检查是否值得加时
                     if retry_count < max_retries:
                         if best_rate >= threshold:
                             logger.info(f"📈 当前最佳完成率 {best_rate:.1%} 接近目标 {target_rate:.1%}，触发自动加时")

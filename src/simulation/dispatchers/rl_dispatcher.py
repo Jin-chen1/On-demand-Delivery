@@ -118,6 +118,7 @@ class RLDispatcher:
         加载训练好的PPO/MaskablePPO模型
         
         自动检测模型类型，优先尝试MaskablePPO
+        支持跳过优化器状态加载（解决训练后代码修改导致的不兼容问题）
         
         Args:
             model_path: 模型路径
@@ -146,6 +147,13 @@ class RLDispatcher:
                     self.use_action_masking = True
                     logger.info(f"成功加载MaskablePPO模型: {path}")
                     return True
+                except ValueError as e:
+                    # 优化器状态不匹配时，尝试手动加载（仅用于推理）
+                    if "optimizer" in str(e).lower():
+                        logger.warning(f"优化器状态不匹配，尝试手动加载policy权重: {e}")
+                        return self._load_model_without_optimizer(str(path), use_maskable=True)
+                    else:
+                        logger.warning(f"MaskablePPO加载失败，尝试标准PPO: {e}")
                 except Exception as e:
                     logger.warning(f"MaskablePPO加载失败，尝试标准PPO: {e}")
             
@@ -157,6 +165,84 @@ class RLDispatcher:
             
         except Exception as e:
             logger.error(f"加载模型失败: {e}")
+            return False
+    
+    def _load_model_without_optimizer(self, model_path: str, use_maskable: bool = True) -> bool:
+        """
+        手动加载模型，跳过优化器状态（仅用于推理）
+        
+        当优化器状态与当前代码不兼容时使用此方法
+        
+        Args:
+            model_path: 模型路径
+            use_maskable: 是否使用MaskablePPO
+            
+        Returns:
+            是否成功加载
+        """
+        import zipfile
+        import tempfile
+        import torch
+        import json
+        import os
+        
+        try:
+            with tempfile.TemporaryDirectory() as tmpdir:
+                # 解压模型文件
+                with zipfile.ZipFile(model_path, 'r') as z:
+                    z.extractall(tmpdir)
+                
+                # 加载数据文件
+                data_path = os.path.join(tmpdir, 'data')
+                with open(data_path, 'r') as f:
+                    data = json.load(f)
+                
+                # 创建新模型（不加载优化器）
+                if use_maskable and MASKABLE_PPO_AVAILABLE:
+                    # 创建一个虚拟环境来初始化模型
+                    from gymnasium import spaces
+                    
+                    # 从数据中提取观测空间维度
+                    obs_shape = data.get('observation_space', {}).get('shape', [860])
+                    if isinstance(obs_shape, list):
+                        obs_shape = tuple(obs_shape)
+                    
+                    obs_space = spaces.Box(low=-np.inf, high=np.inf, shape=obs_shape, dtype=np.float32)
+                    
+                    # 从数据中提取动作空间
+                    action_space_data = data.get('action_space', {})
+                    nvec = action_space_data.get('nvec', [51] * 50)  # 默认值
+                    action_space = spaces.MultiDiscrete(nvec)
+                    
+                    # 创建模型
+                    policy_kwargs = data.get('policy_kwargs', {})
+                    self.model = MaskablePPO(
+                        policy=data.get('policy_class', 'MlpPolicy'),
+                        env=None,
+                        policy_kwargs=policy_kwargs,
+                        device='cpu'
+                    )
+                    
+                    # 手动设置空间
+                    self.model.observation_space = obs_space
+                    self.model.action_space = action_space
+                    
+                    # 加载policy权重
+                    policy_path = os.path.join(tmpdir, 'policy.pth')
+                    policy_state = torch.load(policy_path, map_location='cpu')
+                    self.model.policy.load_state_dict(policy_state)
+                    
+                    self.use_action_masking = True
+                    logger.info(f"成功手动加载MaskablePPO模型（跳过优化器）: {model_path}")
+                    return True
+                else:
+                    logger.error("手动加载仅支持MaskablePPO")
+                    return False
+                    
+        except Exception as e:
+            logger.error(f"手动加载模型失败: {e}")
+            import traceback
+            logger.error(traceback.format_exc())
             return False
     
     def dispatch_pending_orders(self) -> int:

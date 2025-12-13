@@ -49,7 +49,7 @@ class RobustnessExperiment:
     """鲁棒性实验类"""
     
     # 算法列表
-    ALGORITHMS = ['OR-Tools', 'ALNS', 'Hybrid-HRL']
+    ALGORITHMS = ['ALNS', 'Hybrid-HRL']
     
     def __init__(self, config_path: str = None):
         """
@@ -122,7 +122,22 @@ class RobustnessExperiment:
         logger.info(f"  RL模型: {self.rl_model_path}")
     
     def _find_latest_rl_model(self) -> str:
-        """查找最新的RL模型文件"""
+        """查找指定的RL模型文件"""
+        # 指定使用特定的模型文件夹
+        specified_model_dir = project_root / "outputs" / "rl_training" / "models" / "20251205_131542_low_load"
+        
+        if specified_model_dir.exists():
+            # 优先查找 final_curriculum_model.zip
+            model_path = specified_model_dir / "final_curriculum_model.zip"
+            if model_path.exists():
+                return str(model_path)
+            # 回退到 final_model.zip
+            model_path = specified_model_dir / "final_model.zip"
+            if model_path.exists():
+                return str(model_path)
+        
+        # 如果指定目录不存在，回退到自动查找最新模型
+        logger.warning(f"指定模型目录不存在: {specified_model_dir}，尝试自动查找")
         models_dir = project_root / "outputs" / "rl_training" / "models"
         if not models_dir.exists():
             logger.warning(f"模型目录不存在: {models_dir}")
@@ -368,7 +383,8 @@ class RobustnessExperiment:
             # 这确保状态编码维度与模型期望的维度匹配
             rl_config = {
                 'max_pending_orders': 50,
-                'max_couriers': 50  # 必须与训练配置一致
+                'max_couriers': 50,  # 必须与训练配置一致
+                'use_action_masking': True  # 启用动作屏蔽，MaskablePPO模型必须
             }
             dispatcher = RLDispatcher(sim_env, model_path=rl_model_path, config=rl_config)
         else:
@@ -392,6 +408,7 @@ class RobustnessExperiment:
         service_times = []
         merchant_wait_times = []
         
+        # 统计已完成订单的超时情况和服务时间
         if delivery_events:
             for event in delivery_events:
                 order_id = event.entity_id
@@ -405,6 +422,10 @@ class RobustnessExperiment:
                     # 收集骑手在商家的等待时间
                     if hasattr(order, 'waiting_time_at_merchant'):
                         merchant_wait_times.append(order.waiting_time_at_merchant)
+        
+        # 未完成订单也应该计入超时（更严重的失败）
+        uncompleted_orders = total_orders - completed_orders
+        timeout_count += uncompleted_orders  # 未完成订单视为超时
         
         avg_service_time = float(np.mean(service_times)) if service_times else 0.0
         avg_merchant_wait_time = float(np.mean(merchant_wait_times)) if merchant_wait_times else 0.0
@@ -456,8 +477,8 @@ class RobustnessExperiment:
             压力测试结果DataFrame
         """
         # 使用骑手数量级别来模拟压力（100订单固定）
-        # 骑手数量: 25, 20, 15, 12, 10, 8, 6 对应压力级别
-        load_levels = load_levels or [25, 20, 15, 12, 10, 8, 6]
+        # 骑手数量: 20, 15, 10, 5 对应压力级别
+        load_levels = load_levels or [20, 15, 10, 5]
         algorithms = algorithms or self.ALGORITHMS
         
         logger.info("=" * 60)
@@ -524,20 +545,18 @@ class RobustnessExperiment:
         
         fig, ax = plt.subplots(figsize=(10, 6))
         
-        colors = {'OR-Tools': '#3498db', 
-                  'ALNS': '#2ecc71', 'Hybrid-HRL': '#9b59b6'}
-        markers = {'OR-Tools': 's', 
-                   'ALNS': '^', 'Hybrid-HRL': 'D'}
+        colors = {'ALNS': '#2ecc71', 'Hybrid-HRL': '#9b59b6'}
+        markers = {'ALNS': '^', 'Hybrid-HRL': 'D'}
         
         for algo in df['Algorithm'].unique():
-            algo_df = df[df['Algorithm'] == algo]
-            ax.errorbar(algo_df['Load'], algo_df['Timeout Rate'],
+            algo_df = df[df['Algorithm'] == algo].sort_values('Couriers', ascending=False)  # 按骑手数降序排序（从多到少）
+            ax.errorbar(algo_df['Couriers'], algo_df['Timeout Rate'],
                        yerr=algo_df['Timeout Std'],
                        label=algo, color=colors.get(algo, 'gray'),
                        marker=markers.get(algo, 'o'),
                        capsize=3, linewidth=2, markersize=8)
         
-        ax.set_xlabel('Order/Courier Ratio', fontsize=12)
+        ax.set_xlabel('Number of Couriers', fontsize=12)
         ax.set_ylabel('Timeout Rate', fontsize=12)
         ax.set_title('Stress Test: Timeout Rate vs Load Level', fontsize=14)
         ax.legend(loc='upper left', fontsize=10)
@@ -597,8 +616,7 @@ class RobustnessExperiment:
         # 绘制箱线图
         fig, ax = plt.subplots(figsize=(12, 6))
         
-        colors = {'OR-Tools': '#3498db', 
-                  'ALNS': '#2ecc71', 'Hybrid-HRL': '#9b59b6'}
+        colors = {'ALNS': '#2ecc71', 'Hybrid-HRL': '#9b59b6'}
         
         # 准备箱线图数据
         positions = []
@@ -696,18 +714,26 @@ class RobustnessExperiment:
         return results_file
 
 
-def merge_stress_test_results(output_dir: Path, current_df: pd.DataFrame = None) -> pd.DataFrame:
+def merge_stress_test_results(output_dir: Path, current_df: pd.DataFrame = None, 
+                              valid_load_levels: List[int] = None) -> pd.DataFrame:
     """
     合并所有历史压力测试结果
     
     Args:
         output_dir: 结果输出目录
         current_df: 当前运行的结果（可选）
+        valid_load_levels: 有效的骑手数量级别，用于过滤历史数据（如 [20, 15, 10, 5]）
         
     Returns:
         合并后的DataFrame
     """
     all_results = []
+    
+    # 计算有效的 Load 值（100订单 / 骑手数量）
+    valid_loads = None
+    if valid_load_levels:
+        valid_loads = set(100 / n for n in valid_load_levels)
+        logger.info(f"有效的 Load 值: {sorted(valid_loads)}")
     
     # 读取所有历史结果文件
     result_files = list(output_dir.glob("robustness_results_*.json"))
@@ -720,7 +746,9 @@ def merge_stress_test_results(output_dir: Path, current_df: pd.DataFrame = None)
             
             if 'stress_test_curve' in data:
                 for record in data['stress_test_curve']:
-                    all_results.append(record)
+                    # 过滤历史数据，只保留有效的 Load 值
+                    if valid_loads is None or record['Load'] in valid_loads:
+                        all_results.append(record)
         except Exception as e:
             logger.warning(f"读取 {result_file} 失败: {e}")
     
@@ -762,7 +790,7 @@ def main():
     parser.add_argument('--episodes', type=int, default=3,
                        help='每个场景的episode数')
     parser.add_argument('--algorithms', type=str, nargs='+', default=None,
-                       choices=['OR-Tools', 'ALNS', 'Hybrid-HRL'],
+                       choices=['ALNS', 'Hybrid-HRL'],
                        help='指定要测试的算法（可多选），例如: --algorithms ALNS Hybrid-HRL')
     parser.add_argument('--merge-results', action='store_true',
                        help='合并历史结果并绘制曲线（不运行新实验）')
@@ -774,7 +802,8 @@ def main():
     
     # 合并历史结果模式
     if args.merge_results:
-        df = merge_stress_test_results(experiment.output_dir)
+        # 使用当前配置的 load_levels 过滤历史数据
+        df = merge_stress_test_results(experiment.output_dir, valid_load_levels=[20, 15, 10, 5])
         if df is not None and not df.empty:
             experiment.results['stress_test_curve'] = df.to_dict('records')
             experiment.plot_stress_test_curve(df)
@@ -787,8 +816,8 @@ def main():
     # 运行实验
     if args.stress_test:
         df = experiment.run_stress_test_curve(algorithms=args.algorithms, num_episodes=args.episodes)
-        # 尝试合并历史结果
-        merged_df = merge_stress_test_results(experiment.output_dir, current_df=df)
+        # 尝试合并历史结果（使用当前配置的 load_levels 过滤）
+        merged_df = merge_stress_test_results(experiment.output_dir, current_df=df, valid_load_levels=[20, 15, 10, 5])
         if merged_df is not None and len(merged_df) > len(df):
             print(f"\n已合并历史结果，共 {len(merged_df)} 条记录")
             experiment.plot_stress_test_curve(merged_df)
@@ -814,7 +843,7 @@ def main():
     # 如果没有指定任何实验，运行所有鲁棒性场景
     if not (args.stress_test or args.weather_test or args.boxplot or args.scenarios):
         df = experiment.run_stress_test_curve(algorithms=args.algorithms, num_episodes=args.episodes)
-        merged_df = merge_stress_test_results(experiment.output_dir, current_df=df)
+        merged_df = merge_stress_test_results(experiment.output_dir, current_df=df, valid_load_levels=[20, 15, 10, 5])
         if merged_df is not None and len(merged_df) > len(df):
             experiment.plot_stress_test_curve(merged_df)
         else:

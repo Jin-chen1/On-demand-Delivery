@@ -112,8 +112,8 @@ class MetricsCalculator:
                 metrics.completed_orders += 1
                 
                 # 配送时间 = 实际送达时间 - 订单到达时间
-                if order.delivery_time is not None:
-                    delivery_time = order.delivery_time - order.arrival_time
+                if order.delivery_complete_time is not None:
+                    delivery_time = order.delivery_complete_time - order.arrival_time
                     completed_times.append(delivery_time)
                     
                     # 等待时间 = 分配时间 - 到达时间
@@ -122,9 +122,9 @@ class MetricsCalculator:
                         waiting_times.append(waiting_time)
                     
                     # 检查是否超时
-                    if order.delivery_time > order.latest_delivery_time:
+                    if order.delivery_complete_time > order.latest_delivery_time:
                         timeout_count += 1
-                        delay = order.delivery_time - order.latest_delivery_time
+                        delay = order.delivery_complete_time - order.latest_delivery_time
                         total_delay += delay
             
             elif order.status.value == 'timeout':
@@ -211,15 +211,15 @@ class MetricsCalculator:
         for order in orders.values():
             if order.status.value == 'delivered':
                 metrics.completed_orders += 1
-                if order.delivery_time:
-                    delivery_time = order.delivery_time - order.arrival_time
+                if order.delivery_complete_time:
+                    delivery_time = order.delivery_complete_time - order.arrival_time
                     completed_times.append(delivery_time)
                     
                     if order.assignment_time:
                         waiting_time = order.assignment_time - order.arrival_time
                         waiting_times.append(waiting_time)
                     
-                    if order.delivery_time > order.latest_delivery_time:
+                    if order.delivery_complete_time > order.latest_delivery_time:
                         timeout_count += 1
             
             elif order.status.value == 'pending':
