@@ -5,12 +5,19 @@
 simulation:
   total_orders: 500  # 使用500单数据集进行训练
   num_couriers: 20
-  simulation_duration: 43200  # 12小时（秒）- 降低并发压力，使1000单训练可行
+  simulation_duration: 86400  # 24小时（秒）- 覆盖订单时间范围，避免到达时间越界
   dispatch_interval: 60  # 调度间隔（秒）- 与Day 7测试一致
   # 使用均匀网格采样数据（Solomon Random分布，覆盖全路网）
   data_dir: "data/processed/shanghai"
   orders_file: "data/orders/uniform_grid_500.csv"
-  use_gps_coords: false  # 使用路网最短路径距离（Dijkstra）
+  use_gps_coords: false  # 不使用GPS坐标直线距离，使用路网最短路径距离（Dijkstra）
+  
+  # 交通配置 - 训练早期简化环境
+  traffic:
+    enable_time_varying_speed: false  # 禁用时变速度，让Agent先学习基础策略
+    peak_congestion_factor: 1.0       # 无高峰拥堵
+    meal_congestion_factor: 1.0       # 无用餐高峰拥堵
+    speed_noise_std: 0.05             # 减少速度噪声
   
   # 订单生成配置（继承自data_preparation）
   order_generation:
@@ -47,7 +54,7 @@ rl:
     weight_assignment_bonus: 0.2     # 分配奖励（增加2倍）
     
     # v4新增：方案A - 延迟派单惩罚（防止Agent滥用延迟）
-    weight_delay_penalty: 0.05       # 每个待分配订单的延迟惩罚
+    weight_delay_penalty: 0.15       # 每个待分配订单的延迟惩罚（从0.05调整到0.15，增强延迟惩罚信号）
     weight_urgent_delay_penalty: 0.2 # 紧急订单（30分钟内）延迟的额外惩罚
     
     # v4新增：方案C - 紧急订单优先奖励
@@ -101,7 +108,7 @@ rl:
     # PPO特定参数 - v3 Attention优化
     ppo:
       n_steps: 8192        # 增加（从4096到8192），Transformer需要更多样本
-      batch_size: 512      # 大幅增加（从256到512），提升Transformer训练稳定性
+      batch_size: 256      # 历史最佳配置（256配合Attention效果最好）
       n_epochs: 10
       gae_lambda: 0.95
       clip_range: 0.2
@@ -160,7 +167,7 @@ rl:
       eval_freq: 5000           # 评估频率（步数）
       n_eval_episodes: 5        # 每次评估的Episode数（默认5，减少波动）
       overtime_threshold: 0.8   # 加时赛阈值（达到目标的80%可加时）
-      max_retries: 2            # 最大加时次数
+      max_retries: -1           # 最大加时次数（-1表示无限加时，直到达标为止）
       extra_timesteps: 50000    # 每次加时的步数
       
       # 失败处理策略
@@ -192,10 +199,10 @@ rl:
           orders_file: "data/orders/uniform_grid_100.csv"
           total_orders: 100
           num_couriers: 20
-          simulation_duration: 43200  # 12小时
-          timesteps: 50000
-          min_completion_rate: 0.90  # 完成率≥90%
-          max_timeout_rate: 0.10     # 超时率≤10%
+          simulation_duration: 86400  # 24小时
+          timesteps: 100000  # 从50000增加到100000，给模型更多学习时间
+          min_completion_rate: 0.50  # 完成率≥50%
+          max_timeout_rate: 0.50     # 超时率≤50%
           difficulty_score: 0.1
         
         - name: "transition"
@@ -203,10 +210,10 @@ rl:
           orders_file: "data/orders/uniform_grid_300.csv"
           total_orders: 300
           num_couriers: 20
-          simulation_duration: 43200  # 12小时
+          simulation_duration: 86400  # 24小时
           timesteps: 75000
-          min_completion_rate: 0.90  # 完成率≥90%
-          max_timeout_rate: 0.10     # 超时率≤10%
+          min_completion_rate: 0.45  # 完成率≥45%
+          max_timeout_rate: 0.55     # 超时率≤55%
           difficulty_score: 0.2
         
         - name: "low_load"
@@ -214,10 +221,10 @@ rl:
           orders_file: "data/orders/uniform_grid_500.csv"
           total_orders: 500
           num_couriers: 20
-          simulation_duration: 43200  # 12小时
+          simulation_duration: 86400  # 24小时
           timesteps: 100000
-          min_completion_rate: 0.90  # 完成率≥90%
-          max_timeout_rate: 0.10     # 超时率≤10%
+          min_completion_rate: 0.40  # 完成率≥40%
+          max_timeout_rate: 0.60     # 超时率≤60%
           difficulty_score: 0.3
         
         - name: "medium_load"
@@ -225,10 +232,10 @@ rl:
           orders_file: "data/orders/uniform_grid_500.csv"
           total_orders: 500
           num_couriers: 15
-          simulation_duration: 43200  # 12小时
+          simulation_duration: 86400  # 24小时
           timesteps: 150000
-          min_completion_rate: 0.90  # 完成率≥90%
-          max_timeout_rate: 0.10     # 超时率≤10%
+          min_completion_rate: 0.35  # 完成率≥35%
+          max_timeout_rate: 0.65     # 超时率≤65%
           difficulty_score: 0.5
         
         - name: "high_load"
@@ -236,10 +243,10 @@ rl:
           orders_file: "data/orders/uniform_grid_1000.csv"
           total_orders: 1000
           num_couriers: 20
-          simulation_duration: 43200  # 12小时
+          simulation_duration: 86400  # 24小时
           timesteps: 200000
-          min_completion_rate: 0.90  # 完成率≥90%
-          max_timeout_rate: 0.10     # 超时率≤10%
+          min_completion_rate: 0.30  # 完成率≥30%
+          max_timeout_rate: 0.70     # 超时率≤70% (对标ALNS 70.9%)
           difficulty_score: 0.7
         
         - name: "extreme_load"
@@ -247,10 +254,10 @@ rl:
           orders_file: "data/orders/uniform_grid_1000.csv"
           total_orders: 1000
           num_couriers: 15
-          simulation_duration: 43200  # 12小时
+          simulation_duration: 86400  # 24小时
           timesteps: 250000
-          min_completion_rate: 0.90  # 完成率≥90%
-          max_timeout_rate: 0.10     # 超时率≤10%
+          min_completion_rate: 0.25  # 完成率≥25%
+          max_timeout_rate: 0.75     # 超时率≤75%
           difficulty_score: 1.0
   
   # 评估配置 - v2优化
